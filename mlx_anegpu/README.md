@@ -87,5 +87,5 @@ pip install mlx mlx-lm
 ```
 ane_gpu/            python package (accelerate, SplitMLP, ctypes bridge, libane_ffn.dylib)
 src/ane_ffn.m       the ANE bridge (fused FFN + matmul) -> libane_ffn.dylib
-bench/              derisk_overlap.py, mlx_breakdown.py, diag.py, demo_qwen.py
+bench/              ab_interleaved.py (fair A/B), demo_qwen.py, mlx_breakdown.py
 ```

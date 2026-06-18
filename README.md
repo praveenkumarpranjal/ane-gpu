@@ -33,7 +33,7 @@ model = ane_gpu.accelerate(model)     # FFNs now run on ANE + GPU together
 mlx_anegpu/        the product: ane_gpu.accelerate() + ANE bridge dylib + benchmarks
   ane_gpu/         the importable package (accelerate, SplitMLP, ctypes bridge)
   src/ane_ffn.m    the ANE bridge -> libane_ffn.dylib (fused FFN + matmul)
-  bench/           ab_interleaved (the fair benchmark), demo_qwen, mlx_breakdown, diag, derisk_overlap
+  bench/           ab_interleaved (the fair benchmark), demo_qwen, mlx_breakdown
   README.md        product docs + tuning
 
 research/          self-contained ANE microbenchmarks (Objective-C) that established the facts:
@@ -79,6 +79,7 @@ python mlx_anegpu/bench/ab_interleaved.py 16 0.6
 
 Apple Silicon only (developed on M4, macOS 26). Uses **private** `AppleNeuralEngine`
 framework APIs — research/enthusiast use, not App-Store-safe, may break across macOS
-updates. The design rationale lives in `../ANE_GPU_LLM_INFERENCE_PLAN.md`.
+updates. The design rationale and methodology are documented in the per-module READMEs
+and `mlx_anegpu/bench/`.
 
 Built on the private-ANE-API approach from [maderix/ANE](https://github.com/maderix/ANE).

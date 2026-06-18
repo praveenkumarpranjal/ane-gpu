@@ -27,7 +27,7 @@ for SEQ in (256, 512):
     def mm(): return x @ W1
     tmm = t_pipelined(mm)
     gf = 2*SEQ*DIM*HIDDEN/1e9
-    print(f"MLX matmul gate/up   : {tmm*1e6:8.1f} us  ({gf/tmm/1e12:.2f} TFLOPS)")
+    print(f"MLX matmul gate/up   : {tmm*1e6:8.1f} us  ({gf/tmm/1e3:.2f} TFLOPS)")
 
     # MLX full FFN (gate+up+silu+down) throughput, pipelined
     def ffn():
@@ -35,7 +35,7 @@ for SEQ in (256, 512):
         return ((g*mx.sigmoid(g))*u) @ W2
     tffn = t_pipelined(ffn)
     gff = 2*(SEQ*DIM*HIDDEN*3)/1e9
-    print(f"MLX FFN (3 matmuls)  : {tffn*1e6:8.1f} us  ({gff/tffn/1e12:.2f} TFLOPS)")
+    print(f"MLX FFN (3 matmuls)  : {tffn*1e6:8.1f} us  ({gff/tffn/1e3:.2f} TFLOPS)")
 
     # ANE fused FFN at same shape
     W1a = np.ascontiguousarray(np.array(W1.T))  # [hidden,dim]
@@ -49,7 +49,7 @@ for SEQ in (256, 512):
     for _ in range(50):
         k.inbuf[:] = xt; k.run()
     tane=(time.perf_counter()-t0)/50
-    print(f"ANE fused FFN        : {tane*1e6:8.1f} us  ({gff/tane/1e12:.2f} TFLOPS)")
+    print(f"ANE fused FFN        : {tane*1e6:8.1f} us  ({gff/tane/1e3:.2f} TFLOPS)")
     print(f"  -> ANE vs MLX FFN  : {tffn/tane:.2f}x  (>1 means ANE faster)")
 
     # overhead of the integration glue (transpose + copies), per call
