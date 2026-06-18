@@ -108,10 +108,12 @@ class SplitMLP(nn.Module):
             mx.async_eval(y_gpu)
         if P: PROF["gpu_dispatch"] += t() - t0
 
-        # ANE sub-FFN — needs x materialized as fp16 [dim, Npad] (channel-major)
+        # ANE sub-FFN — hand x over as fp16 [dim, Npad] (transpose on the GPU, ~22us,
+        # not on the CPU which costs ~3.8ms for a batched activation)
         if P: t0 = t()
-        xnp = np.array(flat.astype(mx.float16))          # [N, dim]  (forces eval of x)
-        k.inbuf[:, :N] = xnp.T                            # write straight into IOSurface
+        xt = mx.transpose(flat.astype(mx.float16))        # [dim, N] on GPU
+        mx.eval(xt)                                       # forces x; the GPU did the transpose
+        k.inbuf[:, :N] = np.array(xt)                     # one memcpy into the input IOSurface
         if Npad > N:
             k.inbuf[:, N:] = 0
         if P: PROF["materialize"] += t() - t0; t0 = t()
@@ -120,7 +122,7 @@ class SplitMLP(nn.Module):
         if not ok:
             PROF["fallback"] += 1
             return self._gpu_full(x)                      # graceful GPU fallback
-        y_ane = mx.array(np.ascontiguousarray(k.outbuf[:, :N].T))  # [N, dim]
+        y_ane = mx.transpose(mx.array(k.outbuf[:, :N]))   # [N, dim] (transpose on GPU)
         if P: PROF["out_copy"] += t() - t0; t0 = t()
 
         if y_gpu is not None:
@@ -175,14 +177,15 @@ class SplitLinear(nn.Module):
         y_gpu = (flat @ self.Wg) if self.gpu_out > 0 else None
         if y_gpu is not None:
             mx.async_eval(y_gpu)
-        xnp = np.array(flat.astype(mx.float16))            # [N, in]  (forces eval of x)
-        k.inbuf[:, :N] = xnp.T
+        xt = mx.transpose(flat.astype(mx.float16))         # [in, N] on GPU (not CPU)
+        mx.eval(xt)
+        k.inbuf[:, :N] = np.array(xt)                      # one memcpy into the input IOSurface
         if Npad > N:
             k.inbuf[:, N:] = 0
         if not k.run():                                    # ANE failure -> graceful GPU fallback
             PROF["fallback"] += 1
             return self._gpu_full(flat, shape)
-        y_ane = mx.array(np.ascontiguousarray(k.outbuf[:, :N].T))   # [N, ane_out]
+        y_ane = mx.transpose(mx.array(k.outbuf[:, :N]))    # [N, ane_out] (transpose on GPU)
         if y_gpu is not None:
             mx.eval(y_gpu)
             y = mx.concatenate([y_ane, y_gpu], axis=-1)    # ANE owns channels [0:ane_out]

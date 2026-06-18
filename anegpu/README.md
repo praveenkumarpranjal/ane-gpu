@@ -40,14 +40,15 @@ to measure; naive baseline-then-accel inflates the ratio because the second run 
 
 ```
  256 tok (B=1)  : <1x   -> gated to GPU by default (no regression)
-4096 tok (B=16) : 1.08x
-8192 tok (B=32) : 1.17x   (grows with batch; under sustained load the throttled GPU
-                            benefits more from ANE offload)
+4096 tok (B=16) : 1.29x
+8192 tok (B=32) : 1.30x   (~3270 tok/s prefill)
 ```
 
-This is a **real but modest** throughput gain in the batched/serving regime, not a
-universal 2–5× speedup. The ceiling is set by Amdahl (attention stays on GPU) plus the
-per-layer hand-off between lazy MLX and the eager ANE. See `../benchmarks/` for the full analysis.
+A **real** throughput gain in the batched/serving regime, not a universal 2–5× speedup.
+The biggest hand-off cost was the CPU transpose of the activation (3.8 ms batched vs 22 µs
+on GPU) — done with `mx.transpose` it lifted the win from ~1.1× to ~1.3×. The remaining
+ceiling is Amdahl (attention stays on GPU) plus the unavoidable per-layer sync. See
+`../benchmarks/` for the full analysis.
 
 ## Requirements / caveats
 
