@@ -1,0 +1,6 @@
+# ane-gpu — Python dependencies (Apple Silicon, Python 3.9+)
+# tested with: mlx 0.31.2, mlx-lm 0.31.3
+mlx
+mlx-lm
+numpy
+transformers      # used by export_qwen.py for tokenization (also pulled in by mlx-lm)

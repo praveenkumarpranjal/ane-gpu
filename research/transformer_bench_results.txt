@@ -1,0 +1,96 @@
+================================================================
+  Transformer Layer GPU+ANE Split Benchmark
+================================================================
+
+  GPU: Apple M4
+  ANE: initialized ✓
+  Metal shaders: compiled ✓
+
+
+================================================================
+  Benchmark 1: SwiGLU Split vs GPU-only
+================================================================
+
+  Config              Ratio   ANE ch   GPU ch   GPU-only  Split μs  Speedup
+  ------------------ ------ -------- -------- ---------- ---------- --------
+  [DBG] Config Stories110M/256: dim=768 hidden=2048 seq=256 n_heads=6
+  [DBG] Creating GPU-only buffers...
+  [DBG] Creating GPU-only FFN state...
+  [DBG] GPU-only FFN state created. Running warmup...
+  [DBG] Warmup iter 0...
+  [DBG] Warmup iter 1...
+  [DBG] Warmup iter 2...
+  [DBG] Warmup done. Timing...
+  [DBG] GPU-only: 3129 μs. Now compiling split configs...
+  Stories110M/256       0.7     1424      624       3129       2677    1.17x ✓
+  Stories110M/256       0.8     1632      416       3129       2568    1.22x ✓
+  Stories110M/256       0.9     1840      208       3129       2365    1.32x ✓
+  [DBG] Config Qwen3-0.6B/256: dim=1024 hidden=2816 seq=256 n_heads=8
+  [DBG] Creating GPU-only buffers...
+  [DBG] Creating GPU-only FFN state...
+  [DBG] GPU-only FFN state created. Running warmup...
+  [DBG] Warmup iter 0...
+  [DBG] Warmup iter 1...
+  [DBG] Warmup iter 2...
+  [DBG] Warmup done. Timing...
+  [DBG] GPU-only: 4948 μs. Now compiling split configs...
+  Qwen3-0.6B/256        0.7     1968      848       4948       3426    1.44x ✓
+  Qwen3-0.6B/256        0.8     2240      576       4948       3142    1.57x ✓
+  Qwen3-0.6B/256        0.9     2528      288       4948       2366    2.09x ✓
+  [DBG] Config Llama-7B/128: dim=4096 hidden=11008 seq=128 n_heads=32
+  [DBG] Creating GPU-only buffers...
+  [DBG] Creating GPU-only FFN state...
+  [DBG] GPU-only FFN state created. Running warmup...
+  [DBG] Warmup iter 0...
+  [DBG] Warmup iter 1...
+  [DBG] Warmup iter 2...
+  [DBG] Warmup done. Timing...
+  [DBG] GPU-only: 36873 μs. Now compiling split configs...
+  Llama-7B/128          0.7     7696     3312      36873     246742    0.15x ✗
+  Llama-7B/128          0.8     8800     2208      36873       8291    4.45x ✓
+  Llama-7B/128          0.9     9904     1104      36873       7170    5.14x ✓
+
+================================================================
+  Benchmark 2: Full Transformer Layer (Split vs GPU-only)
+================================================================
+
+  Llama-7B/128:
+    GPU-only layer: 32825 μs
+    Split ratio=0.8: 22113 μs (1.48x ✓ WIN)
+    Breakdown: attention=9669 μs  FFN(split)=7314 μs  overhead=5130 μs
+
+================================================================
+  Benchmark 3: 32-Layer Pipeline (IOSurface reuse)
+================================================================
+
+  Config: Llama-7B (32 layers, seq=128, ratio=0.8)
+  ANE kernels: 2 (W1W3 + W2), reused across all layers
+
+  Single layer: 23061 μs
+  32-layer total: 755099 μs (755.1 ms)
+  Per-layer in pipeline: 23597 μs
+  Pipeline efficiency: 97.7% (vs 23061 μs × 32 = 737950 μs)
+
+  Prefill throughput: 170 tokens/sec (755.1 ms for 128 tokens)
+
+================================================================
+  Benchmark 4: Decode Mode (seq=1 → 64, KV-cache)
+================================================================
+
+  seq_len    GPU-only  Split μs  Speedup  Verdict
+  -------- ---------- ---------- -------- --------
+  1              6743       3182    2.12x  ✓ WIN
+  4              7870       3173    2.48x  ✓ WIN
+  8             10403       3527    2.95x  ✓ WIN
+  16             7488       6785    1.10x  ✓ WIN
+  32             7800       5354    1.46x  ✓ WIN
+  64             8880       5503    1.61x  ✓ WIN
+  128           16264       7310    2.22x  ✓ WIN
+
+  Note: At seq=1, ANE dispatch floor (~22 μs) relative to compute
+  determines whether splitting is profitable.
+
+================================================================
+  All benchmarks complete.
+================================================================
+

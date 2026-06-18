@@ -1,0 +1,15 @@
+"""ane_gpu — run MLX model FFNs across the Apple Neural Engine + GPU concurrently.
+
+    from mlx_lm import load
+    import ane_gpu
+    model, tok = load("Qwen/Qwen2.5-0.5B-Instruct")
+    model = ane_gpu.accelerate(model)   # FFNs now run on ANE+GPU together
+
+Accelerates compute-bound phases (prefill, long context, batched). Single-token
+decode falls back to GPU automatically. Apple Silicon only; uses private ANE APIs.
+"""
+from .split_mlp import accelerate, SplitMLP
+from . import _bridge
+
+__all__ = ["accelerate", "SplitMLP", "_bridge"]
+__version__ = "0.1.0"

@@ -1,0 +1,33 @@
+# Qwen2.5-0.5B-Instruct — GPU-only fp16 Inference Results
+# Hardware: Apple M4 (10-core GPU)
+# Engine: Metal + MPS fp16 matmuls, fused online-softmax GQA attention
+
+## Correctness
+All prompts generate coherent, contextually appropriate responses.
+Model correctly applies chat template and stops at EOS token.
+
+## Performance (GPU-only baseline)
+| Prompt            | Input Tok | Gen Tok | Prefill ms/tok | Decode tok/s |
+|-------------------|-----------|---------|----------------|--------------|
+| "Hi"              | 30        | 10      | 48.1           | 24.5         |
+| Quantum computing | 33        | 64      | 32.1           | 23.2         |
+| Fibonacci code    | 38        | 96      | 31.4           | 20.4         |
+
+## Timing Breakdown
+- Weight load: ~450-600 ms (mmap + Metal buffer creation)
+- Engine setup: ~14 ms (MPS objects, RoPE tables, KV cache)
+- Prefill: ~32-48 ms/token (sequential, no batching)
+- Decode: ~41-49 ms/token (depends on cache length)
+
+## Architecture
+- fp16 weights (BF16→FP16 converted from safetensors)
+- fp16 activations throughout
+- fp32 accumulators in RMSNorm, attention softmax
+- MPS fp16 matmuls for projections (Q, K, V, O, gate, up, down, lm_head)
+- Metal compute for: embedding, RMSNorm, RoPE, bias add, silu_mul, residual
+- Fused online-softmax GQA decode attention (no N² score matrix)
+- Per-layer KV cache [128, 2048] fp16
+
+## Next: ANE Split
+Target: offload 80% of FFN matmuls to ANE for concurrent execution.
+Expected improvement: 2-5x on FFN, 1.3-1.5x end-to-end layer speedup.

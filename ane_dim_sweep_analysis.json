@@ -1,0 +1,26 @@
+{
+  "out_ch_sweep_768": {
+    "total": 160,
+    "compiled": 160,
+    "failed": 0,
+    "fail_dims": [],
+    "best_dim": 2336,
+    "best_tflops": 5.469
+  },
+  "out_ch_sweep_4096": {
+    "total": 175,
+    "compiled": 175,
+    "failed": 0,
+    "fail_dims": [],
+    "best_dim": 10496,
+    "best_tflops": 7.376
+  },
+  "in_ch_sweep_512": {
+    "total": 271,
+    "compiled": 271,
+    "failed": 0,
+    "fail_dims": [],
+    "best_dim": 512,
+    "best_tflops": 3.094
+  }
+}
