@@ -15,10 +15,14 @@ import time
 import numpy as np
 import mlx.core as mx
 import mlx.nn as nn
-from . import _bridge as ane
+from . import _native as ane
 
-_PROFILE = os.environ.get("ANE_GPU_PROFILE", "") == "1"
+_PROFILE = os.environ.get("ANEGPU_PROFILE", "") == "1"
 ENABLED = True   # runtime toggle: when False, SplitMLP runs the pure-GPU path (for fair A/B)
+def set_enabled(v):
+    """Globally enable/disable the ANE path (disabled -> SplitMLP runs pure GPU)."""
+    global ENABLED
+    ENABLED = bool(v)
 PROF = {"gpu_dispatch": 0.0, "materialize": 0.0, "ane_run": 0.0, "out_copy": 0.0, "join": 0.0, "n": 0, "fallback": 0}
 def prof_reset():
     for k in PROF: PROF[k] = 0.0
@@ -150,5 +154,5 @@ def accelerate(model, ane_frac=0.7, min_seq=1024, verbose=True):
         blk.mlp = SplitMLP(gp.weight, up.weight, dn.weight, ane_frac=ane_frac, min_seq=min_seq)
         n += 1
     if verbose:
-        print(f"[ane_gpu] accelerated {n} FFN layers (ane_frac={ane_frac}, min_seq={min_seq})")
+        print(f"[anegpu] accelerated {n} FFN layers (ane_frac={ane_frac}, min_seq={min_seq})")
     return model

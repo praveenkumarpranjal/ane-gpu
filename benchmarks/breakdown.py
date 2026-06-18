@@ -4,7 +4,7 @@ import sys, os, time
 import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import mlx.core as mx
-from ane_gpu import _bridge as ane
+from anegpu import _native as ane
 
 DIM, HIDDEN = 896, 4864
 def t_pipelined(make, iters=50, warm=10):

@@ -10,8 +10,8 @@ HF_MODEL_DIR = os.path.expanduser(
 )
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 WEIGHTS_PATH = os.path.join(SCRIPT_DIR, "qwen_weights.bin")
-ENGINE_SRC = os.path.join(SCRIPT_DIR, "qwen_split_infer.m")
-ENGINE_BIN = os.path.join(SCRIPT_DIR, "qwen_split_infer")
+ENGINE_SRC = os.path.join(SCRIPT_DIR, "qwen_engine.m")
+ENGINE_BIN = os.path.join(SCRIPT_DIR, "qwen_engine")
 
 
 def bf16_to_fp16(raw: bytes, count: int) -> bytes:

@@ -4,22 +4,20 @@ __pycache__/
 .venv/
 venv/
 
-# Build artifacts (rebuild: `cd mlx_anegpu/src && make`, `cd bridge && make`)
+# Build artifacts (rebuild: `cd native && make`, `cd bridge && make`)
 *.o
 *.dylib
 
 # Compiled benchmark / engine binaries (rebuild from the .m source)
-qwen_split_infer
-qwen_noANE
+/qwen/qwen_engine
 /research/ane_ffn_probe
 /research/gpu_matmul_probe
 /research/fused_ffn_probe
 /research/ffn_overlap_bench
-/research/ane_correctness_test
 /research/iosurface_gpu_ane_bench
 /research/transformer_layer_bench
 
-# Model weights — regenerate with `python export_qwen.py` (~1 GB)
+# Model weights — regenerate with `python qwen/export_qwen.py` (~1 GB)
 *.bin
 
 # macOS

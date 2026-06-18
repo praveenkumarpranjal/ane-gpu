@@ -42,7 +42,7 @@ ANEKernelHandlePtr = ctypes.POINTER(ANEKernelHandle)
 
 def load_ane_bridge():
     """Load libane_bridge.dylib and bind all functions."""
-    bridge_path = Path(__file__).parent / "bridge" / "libane_bridge.dylib"
+    bridge_path = Path(__file__).resolve().parent.parent / "bridge" / "libane_bridge.dylib"
     if not bridge_path.exists():
         print(f"ERROR: Bridge dylib not found at {bridge_path}")
         print("Run: cd bridge && make")

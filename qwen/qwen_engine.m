@@ -1,6 +1,6 @@
-// qwen_split_infer.m — Qwen2.5-0.5B-Instruct GPU+ANE Split Inference
+// qwen_engine.m — Qwen2.5-0.5B-Instruct GPU+ANE Split Inference
 //
-// Usage: ./qwen_split_infer <weights.bin> <token_ids_csv> <max_tokens> <eos_id>
+// Usage: ./qwen_engine <weights.bin> <token_ids_csv> <max_tokens> <eos_id>
 // Output: token IDs streamed as generated, timing on stderr
 //
 // Features:

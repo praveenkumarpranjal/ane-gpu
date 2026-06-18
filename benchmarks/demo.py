@@ -1,6 +1,6 @@
 """Showcase: accelerate a real MLX Qwen2.5-0.5B with ANE+GPU and measure throughput.
 
-Usage: python demo_qwen.py [batch] [ane_frac]
+Usage: python demo.py [batch] [ane_frac]
   batch=1  -> single-stream (ANE gated off by default; no regression)
   batch=16 -> batched/serving throughput (ANE+GPU run concurrently -> speedup)
 """
@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 import mlx.core as mx
 from mlx_lm import load
-import ane_gpu
+import anegpu
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 B = int(sys.argv[1]) if len(sys.argv) > 1 else 16
@@ -34,7 +34,7 @@ t_base = bench(lambda: mx.eval(model(x)))
 logits_base = np.array(model(x)[:, -1].astype(mx.float32))
 
 # engage ANE for this workload (min_seq low so the demo exercises it even at B=1)
-model = ane_gpu.accelerate(model, ane_frac=FRAC, min_seq=64)
+model = anegpu.accelerate(model, ane_frac=FRAC, min_seq=64)
 mx.eval(model(x))                            # warm/compile ANE kernels
 t_acc = bench(lambda: mx.eval(model(x)))
 logits_acc = np.array(model(x)[:, -1].astype(mx.float32))

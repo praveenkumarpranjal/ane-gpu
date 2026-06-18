@@ -1,4 +1,4 @@
-// ane_ffn.m — libane_ffn.dylib : C API to run fused SwiGLU FFN (and plain matmul)
+// ane_ffn.m — libanegpu.dylib : C API to run fused SwiGLU FFN (and plain matmul)
 // sub-blocks on the Apple Neural Engine via private AppleNeuralEngine.framework.
 // Designed to be called from Python (ctypes) and overlapped with MLX GPU work.
 //

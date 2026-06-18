@@ -1,4 +1,4 @@
-DYLIB = ../ane_gpu/libane_ffn.dylib
+DYLIB = ../anegpu/libanegpu.dylib
 
 $(DYLIB): ane_ffn.m
 	xcrun clang -O2 -fobjc-arc -dynamiclib \

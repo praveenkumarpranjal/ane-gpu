@@ -1,18 +1,18 @@
-# ane_gpu — run MLX model FFNs on the Apple Neural Engine **and** GPU at the same time
+# anegpu — run MLX model FFNs on the Apple Neural Engine **and** GPU at the same time
 
-`ane_gpu` is a drop-in accelerator for [MLX](https://github.com/ml-explore/mlx) /
+`anegpu` is a drop-in accelerator for [MLX](https://github.com/ml-explore/mlx) /
 [mlx-lm](https://github.com/ml-explore/mlx-lm) models on Apple Silicon. One call —
-`ane_gpu.accelerate(model)` — rewrites each transformer block's SwiGLU FFN so that it
+`anegpu.accelerate(model)` — rewrites each transformer block's SwiGLU FFN so that it
 runs **concurrently across the Apple Neural Engine and the GPU**, treating the two
 engines as one. The ANE computes a fused sub-FFN over part of the hidden dimension while
 the GPU (MLX) computes the rest; the partial results are summed.
 
 ```python
 from mlx_lm import load
-import ane_gpu
+import anegpu
 
 model, tok = load("Qwen/Qwen2.5-0.5B-Instruct")
-model = ane_gpu.accelerate(model)          # FFNs now run on ANE + GPU together
+model = anegpu.accelerate(model)           # FFNs now run on ANE + GPU together
 # ... use mlx_lm.generate / model(...) exactly as before
 ```
 
@@ -47,7 +47,7 @@ to measure; naive baseline-then-accel inflates the ratio because the second run 
 
 This is a **real but modest** throughput gain in the batched/serving regime, not a
 universal 2–5× speedup. The ceiling is set by Amdahl (attention stays on GPU) plus the
-per-layer hand-off between lazy MLX and the eager ANE. See `bench/` for the full analysis.
+per-layer hand-off between lazy MLX and the eager ANE. See `../benchmarks/` for the full analysis.
 
 ## Requirements / caveats
 
@@ -61,7 +61,8 @@ per-layer hand-off between lazy MLX and the eager ANE. See `bench/` for the full
 ## Build
 
 ```bash
-cd src && make            # builds ane_gpu/libane_ffn.dylib
+# from the repo root:
+cd native && make        # builds anegpu/libanegpu.dylib
 pip install mlx mlx-lm
 ```
 
@@ -72,7 +73,7 @@ pip install mlx mlx-lm
    `down( silu(gate(x)) * up(x) )` over `ane_frac` of the channels; the GPU (MLX) computes
    the rest.
 3. Per call: the GPU sub-FFN is dispatched with `mx.async_eval` (non-blocking) and the ANE
-   sub-FFN runs concurrently via the `libane_ffn` bridge; the two partials are summed.
+   sub-FFN runs concurrently via the native `libanegpu` bridge; the two partials are summed.
 4. The ANE matmuls are 1×1 convs over a `[1, C, 1, seq]` fp16 tensor; **seq is padded to a
    multiple of 32** (an ANE tiling requirement — multiples of 16 are not sufficient).
 
@@ -81,11 +82,12 @@ pip install mlx mlx-lm
 - `ane_frac` (default 0.7): fraction of the FFN hidden dim given to the ANE. Lower values
   give the GPU more of the (efficient, batched) FFN; ~0.5–0.7 is the sweet spot on M4.
 - `min_seq` (default 1024): minimum tokens-per-forward before the ANE engages.
+- `anegpu.set_enabled(False)` toggles the ANE off at runtime (used by the fair benchmark).
 
 ## Files
 
 ```
-ane_gpu/            python package (accelerate, SplitMLP, ctypes bridge, libane_ffn.dylib)
-src/ane_ffn.m       the ANE bridge (fused FFN + matmul) -> libane_ffn.dylib
-bench/              ab_interleaved.py (fair A/B), demo_qwen.py, mlx_breakdown.py
+anegpu/             this package: accelerate.py, _native.py, libanegpu.dylib
+native/ane_ffn.m    the ANE bridge C source -> anegpu/libanegpu.dylib
+benchmarks/         benchmark.py (fair A/B), demo.py, breakdown.py
 ```

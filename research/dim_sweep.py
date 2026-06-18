@@ -47,7 +47,7 @@ MIL_HEADER = (
 
 
 def load_bridge():
-    bridge_path = Path(__file__).parent / "bridge" / "libane_bridge.dylib"
+    bridge_path = Path(__file__).resolve().parent.parent / "bridge" / "libane_bridge.dylib"
     if not bridge_path.exists():
         print(f"ERROR: {bridge_path} not found. Run: cd bridge && make")
         sys.exit(1)

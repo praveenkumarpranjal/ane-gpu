@@ -1,5 +1,5 @@
 // ane_ffn_probe.m — de-risk gate: does the ANE 1x1-conv-as-matmul path
-// (verbatim from qwen_split_infer.m) compile, evaluate (correct selector),
+// (verbatim from qwen_engine.m) compile, evaluate (correct selector),
 // and produce NUMERICALLY CORRECT output for the real Qwen2.5-0.5B FFN shapes,
 // at decode (spatial=1) and prefill (spatial=128) — and how fast?
 //
@@ -44,7 +44,7 @@ static IOSurfaceRef create_surface(size_t bytes) {
     });
 }
 
-// verbatim from qwen_split_infer.m
+// verbatim from qwen_engine.m
 static uint8_t *build_weight_blob_real(const uint16_t *weights, int out_ch, int in_ch, size_t *out_len) {
     int ws = out_ch * in_ch * 2;
     int total = 128 + ws;

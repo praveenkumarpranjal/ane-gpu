@@ -1,4 +1,4 @@
-"""ctypes bridge to libane_ffn.dylib — run fused SwiGLU FFN / matmul sub-blocks on the ANE.
+"""ctypes bridge to libanegpu.dylib — run fused SwiGLU FFN / matmul sub-blocks on the ANE.
 
 All weights are fp16 numpy arrays. Activations are fp16, channel-first [C, seq] (i.e.
 x[c, s] contiguous in s). seq must be a multiple of 16 (ANE tiling constraint).
@@ -7,7 +7,7 @@ import ctypes
 import os
 import numpy as np
 
-_DLL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "libane_ffn.dylib")
+_DLL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "libanegpu.dylib")
 _lib = ctypes.CDLL(_DLL)
 
 _c = ctypes.c_void_p
