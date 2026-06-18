@@ -17,6 +17,11 @@ import mlx.core as mx
 import mlx.nn as nn
 from . import _native as ane
 
+try:  # for SplitAttention: the dynamic part (scores/softmax/AV) stays on the GPU
+    from mlx_lm.models.base import scaled_dot_product_attention as _sdpa
+except Exception:
+    _sdpa = None
+
 _PROFILE = os.environ.get("ANEGPU_PROFILE", "") == "1"
 ENABLED = True   # runtime toggle: when False, SplitMLP runs the pure-GPU path (for fair A/B)
 def set_enabled(v):
@@ -194,24 +199,69 @@ class SplitLinear(nn.Module):
         return y.reshape(*shape[:-1], self.out_)
 
 
+class SplitAttention(nn.Module):
+    """Heterogeneous attention: q_proj runs on the ANE *concurrently* with k_proj/v_proj
+    on the GPU (the three projections are independent — same input), then the dynamic
+    part (RoPE, scores, softmax, AV) and o_proj stay on the GPU. k/v stay on GPU because
+    they are only 128 out-channels (the per-op map shows the GPU wins there). Falls back
+    to the original attention below min_tokens or when ANE is disabled."""
+    def __init__(self, orig, min_tokens=1024):
+        super().__init__()
+        self.n_heads = orig.n_heads
+        self.n_kv_heads = orig.n_kv_heads
+        self.scale = orig.scale
+        self.rope = orig.rope
+        self.k_proj = orig.k_proj
+        self.v_proj = orig.v_proj
+        self.o_proj = orig.o_proj
+        self.q_proj = orig.q_proj                                  # GPU fallback
+        self.q_ane = SplitLinear(orig.q_proj.weight, getattr(orig.q_proj, "bias", None),
+                                 ane_frac=1.0, min_tokens=min_tokens)   # whole q on ANE
+        self.min_tokens = min_tokens
+
+    def __call__(self, x, mask=None, cache=None):
+        B, L, D = x.shape
+        if ENABLED and _sdpa is not None and B * L >= self.min_tokens:
+            keys = self.k_proj(x); values = self.v_proj(x)
+            mx.async_eval(keys, values)            # GPU computes k,v ...
+            queries = self.q_ane(x)                # ... while the ANE computes q
+        else:
+            queries, keys, values = self.q_proj(x), self.k_proj(x), self.v_proj(x)
+        queries = queries.reshape(B, L, self.n_heads, -1).transpose(0, 2, 1, 3)
+        keys = keys.reshape(B, L, self.n_kv_heads, -1).transpose(0, 2, 1, 3)
+        values = values.reshape(B, L, self.n_kv_heads, -1).transpose(0, 2, 1, 3)
+        if cache is not None:
+            queries = self.rope(queries, offset=cache.offset)
+            keys = self.rope(keys, offset=cache.offset)
+            keys, values = cache.update_and_fetch(keys, values)
+        else:
+            queries = self.rope(queries)
+            keys = self.rope(keys)
+        output = _sdpa(queries, keys, values, cache=cache, scale=self.scale, mask=mask)
+        output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
+        return self.o_proj(output)
+
+
 def accelerate(model, ane_frac=0.7, min_seq=1024, attention=False, verbose=True):
-    """Walk an mlx_lm model and run its FFNs (and optionally the big attention
-    projections) on ANE+GPU concurrently. Returns the same model.
+    """Walk an mlx_lm model and run its FFNs (and optionally attention) on ANE+GPU.
 
-    - Each TransformerBlock's SwiGLU MLP -> SplitMLP.
-    - attention=True also splits q_proj and o_proj -> SplitLinear (k/v stay on GPU:
-      only 128 out-channels, too small to beat the hand-off).
-      NOTE: on 0.5B/M4 this currently *reduces* throughput (measured 1.23x -> 1.10x at
-      B=32) because each projection's per-call hand-off costs more than the projection
-      compute it saves. Kept (default off) for bigger models / once the hand-off is
-      zero-copy; the FFN is large enough to amortize the hand-off, the projections aren't.
+    - Each TransformerBlock's SwiGLU MLP -> SplitMLP (ANE+GPU split, the main win).
+    - attention="parallel": q_proj on the ANE runs CONCURRENTLY with k/v on the GPU
+      (heterogeneous per-op placement from the per-layer benchmark), o/k/v stay GPU.
+    - attention="split" (or True): split q_proj+o_proj output channels ANE||GPU.
 
-    Only non-quantized fp16 Linear layers are touched; quantized/fused are skipped.
-    Prefill/batched run on both engines; single-token decode falls back to GPU.
+    NOTE (measured): BOTH attention modes slightly HURT vs FFN-only — "split" 1.23->1.10x,
+    "parallel" 3382->3011 tok/s @B32. The attention projections are too small to overcome
+    the per-ANE-call sync, even with op-level parallelism. Default attention=False (FFN-only,
+    the production-optimal schedule); the modes are kept for research / bigger models.
+
+    Only non-quantized fp16 Linear layers are touched. Decode falls back to GPU.
     """
     layers = getattr(getattr(model, "model", model), "layers", None)
     if layers is None:
         raise ValueError("could not find model.model.layers — unsupported architecture")
+    mode = ("parallel" if attention == "parallel" else
+            "split" if attention in (True, "split") else None)
     n_mlp = n_attn = 0
     for blk in layers:
         mlp = getattr(blk, "mlp", None)
@@ -220,16 +270,18 @@ def accelerate(model, ane_frac=0.7, min_seq=1024, attention=False, verbose=True)
             if isinstance(gp, nn.Linear) and isinstance(up, nn.Linear) and isinstance(dn, nn.Linear):
                 blk.mlp = SplitMLP(gp.weight, up.weight, dn.weight, ane_frac=ane_frac, min_seq=min_seq)
                 n_mlp += 1
-        if attention:
-            attn = getattr(blk, "self_attn", None)
-            if attn is not None and isinstance(getattr(attn, "q_proj", None), nn.Linear) \
-                                and isinstance(getattr(attn, "o_proj", None), nn.Linear):
+        attn = getattr(blk, "self_attn", None)
+        if mode and attn is not None and isinstance(getattr(attn, "q_proj", None), nn.Linear):
+            if mode == "parallel":
+                blk.self_attn = SplitAttention(attn, min_tokens=min_seq)
+                n_attn += 1
+            elif isinstance(getattr(attn, "o_proj", None), nn.Linear):
                 attn.q_proj = SplitLinear(attn.q_proj.weight, getattr(attn.q_proj, "bias", None),
                                           ane_frac=ane_frac, min_tokens=min_seq)
                 attn.o_proj = SplitLinear(attn.o_proj.weight, getattr(attn.o_proj, "bias", None),
                                           ane_frac=ane_frac, min_tokens=min_seq)
                 n_attn += 1
     if verbose:
-        extra = f" + {n_attn} attention" if attention else ""
+        extra = f" + {n_attn} attention({mode})" if mode else ""
         print(f"[anegpu] accelerated {n_mlp} FFN{extra} layers (ane_frac={ane_frac}, min_seq={min_seq})")
     return model

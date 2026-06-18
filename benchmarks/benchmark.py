@@ -10,7 +10,8 @@ import anegpu
 
 B = int(sys.argv[1]) if len(sys.argv) > 1 else 16
 FRAC = float(sys.argv[2]) if len(sys.argv) > 2 else 0.7   # sweet spot after the GPU-transpose handoff
-ATTN = (len(sys.argv) > 3 and sys.argv[3] in ("1", "attn", "true"))  # also offload q/o projections
+_a = sys.argv[3] if len(sys.argv) > 3 else ""        # ""=FFN-only, "parallel"=q-ANE||kv-GPU, "split"=q/o split
+ATTN = "parallel" if _a == "parallel" else ("split" if _a in ("1", "attn", "split", "true") else False)
 S = 256
 MODEL = os.environ.get("ANEGPU_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
 model, tok = load(MODEL); model.set_dtype(mx.float16); mx.eval(model.parameters())
