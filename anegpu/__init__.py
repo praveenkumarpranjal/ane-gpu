@@ -8,8 +8,8 @@
 Accelerates compute-bound phases (prefill, long context, batched). Single-token
 decode falls back to GPU automatically. Apple Silicon only; uses private ANE APIs.
 """
-from .accelerate import accelerate, SplitMLP, set_enabled
+from .accelerate import accelerate, SplitMLP, SplitLinear, set_enabled
 from . import _native
 
-__all__ = ["accelerate", "SplitMLP", "set_enabled", "_native"]
+__all__ = ["accelerate", "SplitMLP", "SplitLinear", "set_enabled", "_native"]
 __version__ = "0.1.0"

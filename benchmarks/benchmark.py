@@ -10,11 +10,12 @@ import anegpu
 
 B = int(sys.argv[1]) if len(sys.argv) > 1 else 16
 FRAC = float(sys.argv[2]) if len(sys.argv) > 2 else 0.6
+ATTN = (len(sys.argv) > 3 and sys.argv[3] in ("1", "attn", "true"))  # also offload q/o projections
 S = 256
 model, tok = load("Qwen/Qwen2.5-0.5B-Instruct"); model.set_dtype(mx.float16); mx.eval(model.parameters())
 ids = tok.encode("The history of computing spans many disciplines. " * 80)[:S]
 x = mx.array([ids] * B)
-anegpu.accelerate(model, ane_frac=FRAC, min_seq=64, verbose=False)
+anegpu.accelerate(model, ane_frac=FRAC, min_seq=64, attention=ATTN, verbose=False)
 mx.eval(model(x))  # warm/compile
 
 def one():
@@ -30,6 +31,6 @@ for _ in range(10):                         # interleave: GPU, ANE, GPU, ANE, ..
     anegpu.set_enabled(True);  ane.append(one())
 gb, ab = statistics.median(gpu), statistics.median(ane)
 toks = B * S
-print(f"B={B} S={S} ({toks} tok) frac={FRAC}: "
+print(f"B={B} S={S} ({toks} tok) frac={FRAC} attn={ATTN}: "
       f"GPU {gb*1e3:.0f}ms ({toks/gb:.0f} tok/s) | ANE+GPU {ab*1e3:.0f}ms ({toks/ab:.0f} tok/s) | "
       f"median speedup {gb/ab:.2f}x")

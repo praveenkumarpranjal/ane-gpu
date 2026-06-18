@@ -132,27 +132,103 @@ class SplitMLP(nn.Module):
         return y.reshape(shape)
 
 
-def accelerate(model, ane_frac=0.7, min_seq=1024, verbose=True):
-    """Walk an mlx_lm model and replace each TransformerBlock's SwiGLU MLP with a
-    SplitMLP that runs the FFN on ANE+GPU concurrently. Returns the same model.
+class SplitLinear(nn.Module):
+    """Drop-in for nn.Linear (y = x @ W.T + bias) with output channels split ANE||GPU.
+    Used for the big attention projections (q_proj, o_proj). Falls back to pure GPU
+    below min_tokens or on ANE failure. seq is padded to a multiple of 32."""
+    def __init__(self, weight, bias=None, ane_frac=0.6, min_tokens=1024):
+        super().__init__()
+        W = np.ascontiguousarray(np.array(weight.astype(mx.float16)))   # [out, in]
+        self.out_, self.in_ = W.shape
+        self.min_tokens = min_tokens
+        ane_out = _r16(ane_frac * self.out_)
+        ane_out = min(ane_out, self.out_ - 16) if ane_frac < 1.0 else self.out_
+        self.ane_out, self.gpu_out = ane_out, self.out_ - ane_out
+        self._Wa = np.ascontiguousarray(W[:ane_out])                    # ANE shard [ane_out, in]
+        self._kernels = {}
+        if self.gpu_out > 0:
+            self.Wg = mx.array(np.ascontiguousarray(W[ane_out:].T))     # [in, gpu_out]
+        self.Wf = mx.array(np.ascontiguousarray(W.T))                   # [in, out] full-GPU fallback
+        self.bias = mx.array(np.array(bias.astype(mx.float16))) if bias is not None else None
 
-    Only non-quantized gate/up/down Linear MLPs are accelerated; anything else is
-    left untouched. Prefill (and batched) FFNs run on both engines; decode falls back
-    to GPU automatically.
+    def _kernel(self, seq):
+        k = self._kernels.get(seq)
+        if k is None:
+            k = ane.compile_matmul(self.in_, self.ane_out, seq, self._Wa)
+            self._kernels[seq] = k
+        return k
+
+    def _gpu_full(self, flat, shape):
+        y = flat @ self.Wf
+        if self.bias is not None:
+            y = y + self.bias
+        return y.reshape(*shape[:-1], self.out_)
+
+    def __call__(self, x):
+        shape = x.shape
+        flat = x.reshape(-1, self.in_)
+        N = flat.shape[0]
+        if not ENABLED or N < self.min_tokens:
+            return self._gpu_full(flat, shape)
+        Npad = _cpad(N)
+        k = self._kernel(Npad)
+        y_gpu = (flat @ self.Wg) if self.gpu_out > 0 else None
+        if y_gpu is not None:
+            mx.async_eval(y_gpu)
+        xnp = np.array(flat.astype(mx.float16))            # [N, in]  (forces eval of x)
+        k.inbuf[:, :N] = xnp.T
+        if Npad > N:
+            k.inbuf[:, N:] = 0
+        if not k.run():                                    # ANE failure -> graceful GPU fallback
+            PROF["fallback"] += 1
+            return self._gpu_full(flat, shape)
+        y_ane = mx.array(np.ascontiguousarray(k.outbuf[:, :N].T))   # [N, ane_out]
+        if y_gpu is not None:
+            mx.eval(y_gpu)
+            y = mx.concatenate([y_ane, y_gpu], axis=-1)    # ANE owns channels [0:ane_out]
+        else:
+            y = y_ane
+        if self.bias is not None:
+            y = y + self.bias
+        return y.reshape(*shape[:-1], self.out_)
+
+
+def accelerate(model, ane_frac=0.7, min_seq=1024, attention=False, verbose=True):
+    """Walk an mlx_lm model and run its FFNs (and optionally the big attention
+    projections) on ANE+GPU concurrently. Returns the same model.
+
+    - Each TransformerBlock's SwiGLU MLP -> SplitMLP.
+    - attention=True also splits q_proj and o_proj -> SplitLinear (k/v stay on GPU:
+      only 128 out-channels, too small to beat the hand-off).
+      NOTE: on 0.5B/M4 this currently *reduces* throughput (measured 1.23x -> 1.10x at
+      B=32) because each projection's per-call hand-off costs more than the projection
+      compute it saves. Kept (default off) for bigger models / once the hand-off is
+      zero-copy; the FFN is large enough to amortize the hand-off, the projections aren't.
+
+    Only non-quantized fp16 Linear layers are touched; quantized/fused are skipped.
+    Prefill/batched run on both engines; single-token decode falls back to GPU.
     """
     layers = getattr(getattr(model, "model", model), "layers", None)
     if layers is None:
         raise ValueError("could not find model.model.layers — unsupported architecture")
-    n = 0
+    n_mlp = n_attn = 0
     for blk in layers:
         mlp = getattr(blk, "mlp", None)
-        if mlp is None or not all(hasattr(mlp, p) for p in ("gate_proj", "up_proj", "down_proj")):
-            continue
-        gp, up, dn = mlp.gate_proj, mlp.up_proj, mlp.down_proj
-        if not (isinstance(gp, nn.Linear) and isinstance(up, nn.Linear) and isinstance(dn, nn.Linear)):
-            continue  # quantized or fused — skip
-        blk.mlp = SplitMLP(gp.weight, up.weight, dn.weight, ane_frac=ane_frac, min_seq=min_seq)
-        n += 1
+        if mlp is not None and all(hasattr(mlp, p) for p in ("gate_proj", "up_proj", "down_proj")):
+            gp, up, dn = mlp.gate_proj, mlp.up_proj, mlp.down_proj
+            if isinstance(gp, nn.Linear) and isinstance(up, nn.Linear) and isinstance(dn, nn.Linear):
+                blk.mlp = SplitMLP(gp.weight, up.weight, dn.weight, ane_frac=ane_frac, min_seq=min_seq)
+                n_mlp += 1
+        if attention:
+            attn = getattr(blk, "self_attn", None)
+            if attn is not None and isinstance(getattr(attn, "q_proj", None), nn.Linear) \
+                                and isinstance(getattr(attn, "o_proj", None), nn.Linear):
+                attn.q_proj = SplitLinear(attn.q_proj.weight, getattr(attn.q_proj, "bias", None),
+                                          ane_frac=ane_frac, min_tokens=min_seq)
+                attn.o_proj = SplitLinear(attn.o_proj.weight, getattr(attn.o_proj, "bias", None),
+                                          ane_frac=ane_frac, min_tokens=min_seq)
+                n_attn += 1
     if verbose:
-        print(f"[anegpu] accelerated {n} FFN layers (ane_frac={ane_frac}, min_seq={min_seq})")
+        extra = f" + {n_attn} attention" if attention else ""
+        print(f"[anegpu] accelerated {n_mlp} FFN{extra} layers (ane_frac={ane_frac}, min_seq={min_seq})")
     return model
