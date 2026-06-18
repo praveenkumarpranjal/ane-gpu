@@ -14,6 +14,7 @@ venv/
 /research/gpu_matmul_probe
 /research/fused_ffn_probe
 /research/ffn_overlap_bench
+/research/int8_ffn_probe
 /research/iosurface_gpu_ane_bench
 /research/transformer_layer_bench
 
