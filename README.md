@@ -19,10 +19,12 @@ model = anegpu.accelerate(model)      # FFNs now run on ANE + GPU together
 - The ANE computes a fused SwiGLU FFN **~3.5× faster than MLX-GPU in isolation** (1501 µs
   vs 5328 µs @ seq 512), and the split is **numerically correct** (logits match the
   original: argmax match, top-5 5/5).
-- **End-to-end it is a real win in the batched / throughput regime.** Thermally-fair A/B:
-  **B=16 → 1.29×, B=32 → 1.30×** (~3270 tok/s prefill). Single-stream decode is
-  bandwidth-bound, so `accelerate()` **gates the ANE off below `min_seq=1024`** — no
-  regression for chat.
+- **End-to-end it is a real win in the batched / throughput regime:** thermally-fair A/B
+  shows **~1.3× cool, up to ~1.5× under sustained load** (B=16/B=32, frac≈0.7,
+  ANE+GPU ~3.2k tok/s prefill). The ratio rises under sustained load because a thermally
+  throttled GPU baseline benefits more from offloading to the ANE — the realistic serving
+  condition. Single-stream decode is bandwidth-bound, so `accelerate()` **gates the ANE off
+  below `min_seq=1024`** — no regression for chat.
 - The biggest hand-off cost was the CPU transpose of the activation (3.8 ms for a batched
   `[8192,896]` vs **22 µs on the GPU**); doing it with `mx.transpose` lifted the win from
   ~1.1× to ~1.3×.

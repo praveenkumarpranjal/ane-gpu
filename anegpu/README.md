@@ -39,9 +39,9 @@ Measured throughput — **thermally-fair, interleaved** A/B (`ane_frac=0.6`, the
 to measure; naive baseline-then-accel inflates the ratio because the second run is hotter):
 
 ```
- 256 tok (B=1)  : <1x   -> gated to GPU by default (no regression)
-4096 tok (B=16) : 1.29x
-8192 tok (B=32) : 1.30x   (~3270 tok/s prefill)
+ 256 tok (B=1)  : <1x          -> gated to GPU by default (no regression)
+4096 tok (B=16) : 1.3x - 1.47x  (cool -> sustained load)
+8192 tok (B=32) : 1.3x - 1.50x  (~3.2k tok/s prefill; ratio rises as the GPU throttles)
 ```
 
 A **real** throughput gain in the batched/serving regime, not a universal 2–5× speedup.
