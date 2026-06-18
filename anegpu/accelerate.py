@@ -63,13 +63,10 @@ class SplitMLP(nn.Module):
         self._W2a = np.ascontiguousarray(W2[:, :ane_h])
         self._kernels = {}
 
-        # GPU shard weights (pre-transposed for x @ W): keep as MLX fp16 arrays
-        if self.gpu_h > 0:
-            self.W1g = mx.array(np.ascontiguousarray(W1[ane_h:].T))   # [dim, gpu_h]
-            self.W3g = mx.array(np.ascontiguousarray(W3[ane_h:].T))   # [dim, gpu_h]
-            self.W2g = mx.array(np.ascontiguousarray(W2[:, ane_h:].T))  # [gpu_h, dim]
-
-        # full-FFN GPU fallback weights (for decode / small seq)
+        # full FFN weights (GPU). The split GPU shard is a *slice* of these (columns
+        # [ane_h:]), and they double as the decode/small-seq fallback — so we don't store
+        # a separate shard copy (keeps memory ~1.5x the FFN instead of ~2x, matters for
+        # bigger models).
         self.W1f = mx.array(np.ascontiguousarray(W1.T))   # [dim, hidden]
         self.W3f = mx.array(np.ascontiguousarray(W3.T))
         self.W2f = mx.array(np.ascontiguousarray(W2.T))   # [hidden, dim]
@@ -102,9 +99,10 @@ class SplitMLP(nn.Module):
         if P: t0 = t()
         y_gpu = None
         if self.gpu_h > 0:
-            g = flat @ self.W1g
-            u = flat @ self.W3g
-            y_gpu = ((g * mx.sigmoid(g)) * u) @ self.W2g
+            h = self.ane_h                                # GPU computes the hidden slice [h:]
+            g = flat @ self.W1f[:, h:]
+            u = flat @ self.W3f[:, h:]
+            y_gpu = ((g * mx.sigmoid(g)) * u) @ self.W2f[h:, :]
             mx.async_eval(y_gpu)
         if P: PROF["gpu_dispatch"] += t() - t0
 

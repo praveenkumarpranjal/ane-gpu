@@ -12,7 +12,8 @@ B = int(sys.argv[1]) if len(sys.argv) > 1 else 16
 FRAC = float(sys.argv[2]) if len(sys.argv) > 2 else 0.7   # sweet spot after the GPU-transpose handoff
 ATTN = (len(sys.argv) > 3 and sys.argv[3] in ("1", "attn", "true"))  # also offload q/o projections
 S = 256
-model, tok = load("Qwen/Qwen2.5-0.5B-Instruct"); model.set_dtype(mx.float16); mx.eval(model.parameters())
+MODEL = os.environ.get("ANEGPU_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
+model, tok = load(MODEL); model.set_dtype(mx.float16); mx.eval(model.parameters())
 ids = tok.encode("The history of computing spans many disciplines. " * 80)[:S]
 x = mx.array([ids] * B)
 anegpu.accelerate(model, ane_frac=FRAC, min_seq=64, attention=ATTN, verbose=False)
