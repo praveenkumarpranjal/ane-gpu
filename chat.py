@@ -42,7 +42,8 @@ def chat():
     if ANE_PREFILL:
         import anegpu
         runner = anegpu.SingleStreamRunner(model)    # ANE-accelerates prefill >=256 tok
-        print("ANE prefill ON (kicks in for prompts >= 256 tokens)")
+        print("ANE prefill ON (>=256 tok). NOTE: first long prompt of each length compiles")
+        print("kernels (~10s, one-time); only repeated long prompts pay off. Not for casual chat.")
     print("ready. KV cache reused across turns -> only NEW tokens are prefilled each turn.")
     print("('exit' to quit, 'reset' to clear history)\n")
     history = []

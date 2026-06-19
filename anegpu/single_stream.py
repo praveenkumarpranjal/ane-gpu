@@ -85,6 +85,9 @@ class SingleStreamRunner:
 
     def _calibrate(self, x, Npad):
         """One fp16-reference forward: keep int8 per layer only if finite + accurate."""
+        import sys
+        print(f"anegpu: compiling {len(self.layers)} ANE kernels for length-bucket {Npad} "
+              f"(one-time, ~10s)...", file=sys.stderr, flush=True)
         S = x.shape[1]
         h = self.mdl.embed_tokens(x); mask = _mkmask(h, None)
         for li, l in enumerate(self.layers):
