@@ -29,6 +29,11 @@ try:
 except Exception:
     _make_mask = None
 
+try:
+    from mlx_lm.models.gemma3 import clip_residual as _clip_residual_fn
+except Exception:
+    _clip_residual_fn = None
+
 
 class PipelinedRunner:
     def __init__(self, model, ane_frac=1.0, int8=False):
@@ -39,6 +44,13 @@ class PipelinedRunner:
         self.dim = model.args.hidden_size
         self.hidden = model.args.intermediate_size
         self.tied = getattr(model.args, "tie_word_embeddings", False)
+        # --- architecture adapter (Qwen/Llama SwiGLU  vs  Gemma GeGLU sandwich-norm) ---
+        l0 = self.layers[0]
+        self._gemma = (hasattr(l0, "pre_feedforward_layernorm")
+                       and hasattr(l0, "post_feedforward_layernorm"))
+        self._gelu = False          # FFN activation, auto-detected in _check_compatible
+        self._sw_pattern = getattr(self.mdl, "sliding_window_pattern", 1)
+        self._window = getattr(self.mdl, "window_size", None)
         ah = _r16(ane_frac * self.hidden)
         ah = min(ah, self.hidden - 16) if ane_frac < 1.0 else self.hidden
         self.ane_h, self.gpu_h = ah, self.hidden - ah
@@ -67,14 +79,54 @@ class PipelinedRunner:
         if k is None:
             g, u, d = self._Wa[li]
             compile_fn = ane.compile_ffn_int8 if self.int8 else ane.compile_ffn
-            k = compile_fn(self.dim, self.ane_h, Npad, g, u, d)
+            k = compile_fn(self.dim, self.ane_h, Npad, g, u, d, gelu=self._gelu)
             self._kernels[(li, Npad)] = k
         return k
 
+    def _embed(self, toks):
+        h = self.mdl.embed_tokens(toks)
+        if self._gemma:                                   # Gemma scales embeddings by sqrt(dim)
+            h = h * mx.array(self.dim ** 0.5, mx.bfloat16).astype(h.dtype)
+        return h
+
+    def _clip_residual(self, x, y):
+        if _clip_residual_fn is not None:
+            return _clip_residual_fn(x, y)
+        if x.dtype != mx.float16:
+            return x + y
+        b = 65504.0      # fp16 max — Gemma clips the residual to avoid overflow
+        return mx.clip(x.astype(mx.float32) + y.astype(mx.float32), -b, b).astype(mx.float16)
+
+    def _masks(self, h0):
+        """Returns (global_mask, sliding_mask). Gemma alternates them per layer; others
+        use a single causal mask (sliding=None)."""
+        gm = _make_mask(h0, None)
+        sw = None
+        if self._gemma and self._sw_pattern > 1 and self._window:
+            try:
+                sw = _make_mask(h0, None, window_size=self._window)
+            except Exception:
+                sw = None        # short seq (< window) -> sliding == causal anyway
+        return gm, sw
+
+    def _mask_for(self, l, gm, sw):
+        if sw is None:
+            return gm
+        is_global = (l % self._sw_pattern == self._sw_pattern - 1)
+        return gm if is_global else sw
+
     def _attn(self, h, layer, mask):
         r = layer.self_attn(layer.input_layernorm(h), mask, None)
+        if self._gemma:                                   # post-attn norm on the attn OUTPUT
+            h = self._clip_residual(h, layer.post_attention_layernorm(r))
+            return h, layer.pre_feedforward_layernorm(h)
         h = h + r
         return h, layer.post_attention_layernorm(h)
+
+    def _ffn_combine(self, h_after, ffn_out, layer):
+        if self._gemma:
+            return self._clip_residual(h_after, layer.post_feedforward_layernorm(ffn_out))
+        return h_after + ffn_out
 
     def _gpu_ffn_shard(self, ffn_in_flat, li):     # GPU does (1-ane_frac) of the FFN
         W1g, W3g, W2g = self._Wg[li]
@@ -99,24 +151,32 @@ class PipelinedRunner:
         return self.model.lm_head(h)
 
     def _check_compatible(self):
-        """Verify the fused-SwiGLU ANE kernel actually reproduces THIS model's FFN.
-        Returns False for non-SwiGLU archs (e.g. Gemma's GeGLU) or any structural
-        mismatch, so __call__ can transparently fall back to plain MLX — never wrong,
-        never crash."""
+        """Auto-detect this model's FFN activation by checking which fused kernel (SiLU
+        vs GELU) reproduces the model's own mlp() on a probe. Sets self._gelu. Returns
+        False (-> fall back to plain MLX) if neither matches — unknown/unsupported arch,
+        so we never crash and never emit wrong output."""
         try:
+            if self.gpu_h > 0:        # split mode is Qwen/SwiGLU-only; skip detection
+                self._gelu = False
+                return True
             l0 = self.layers[0]
             probe = (mx.random.normal((32, self.dim)) * 0.5).astype(mx.float16)
-            ref = l0.mlp(probe)
-            k = self._kernel(0, 32)
-            if not k:
-                return False
-            k.inbuf[:, :32] = np.array(mx.transpose(probe.astype(mx.float16)))
-            if not k.run():
-                return False
-            got = mx.transpose(mx.array(k.outbuf[:, :32]))
-            mx.eval(ref, got)
-            rel = float(mx.mean(mx.abs(got - ref)) / (mx.mean(mx.abs(ref)) + 1e-6))
-            return rel < 0.05
+            ref = l0.mlp(probe); mx.eval(ref)
+            xin = np.array(mx.transpose(probe.astype(mx.float16)))
+            g, u, d = self._Wa[0]
+            for gelu in (False, True):                       # fp16 probe = clean activation signal
+                k = ane.compile_ffn(self.dim, self.ane_h, 32, g, u, d, gelu=gelu)
+                if not k:
+                    continue
+                k.inbuf[:, :32] = xin
+                ok = k.run()
+                got = mx.transpose(mx.array(k.outbuf[:, :32])); mx.eval(got)
+                rel = float(mx.mean(mx.abs(got - ref)) / (mx.mean(mx.abs(ref)) + 1e-6))
+                k.free()
+                if ok and rel < 0.05:
+                    self._gelu = gelu
+                    return True
+            return False
         except Exception:
             return False
 
@@ -139,13 +199,13 @@ class PipelinedRunner:
             return self.model(tokens)
         split = self.gpu_h > 0
 
-        mask = _make_mask(self.mdl.embed_tokens(t[0]), None)
-        h = [self.mdl.embed_tokens(t[0]), self.mdl.embed_tokens(t[1])]
+        h = [self._embed(t[0]), self._embed(t[1])]
+        gm, sw = self._masks(h[0])
         ffn_in = [None, None]
         sched = [(b, l) for l in range(L) for b in (0, 1)]
 
         b0, l0 = sched[0]
-        h[b0], ffn_in[b0] = self._attn(h[b0], self.layers[l0], mask)
+        h[b0], ffn_in[b0] = self._attn(h[b0], self.layers[l0], self._mask_for(l0, gm, sw))
         mx.eval(h[b0], ffn_in[b0])
 
         for i in range(1, len(sched)):
@@ -154,14 +214,14 @@ class PipelinedRunner:
             self._ffn_prep(ffn_in[pb], kern[pl], N, Npad)      # stage ANE input (ANE shard)
             th = threading.Thread(target=kern[pl].run)         # ANE runs the ANE shard ...
             th.start()
-            h[b], ffn_in[b] = self._attn(h[b], self.layers[l], mask)   # ... GPU does attention
+            h[b], ffn_in[b] = self._attn(h[b], self.layers[l], self._mask_for(l, gm, sw))  # GPU attn
             y_gpu = self._gpu_ffn_shard(ffn_in[pb].reshape(-1, self.dim), pl) if split else None
             mx.eval([h[b], ffn_in[b]] + ([y_gpu] if split else []))     # ... + the GPU FFN shard
             th.join()
             y = self._ffn_read(kern[pl], N, h[pb].shape)
             if split:
                 y = y + y_gpu.reshape(h[pb].shape)
-            h[pb] = h[pb] + y
+            h[pb] = self._ffn_combine(h[pb], y, self.layers[pl])
 
         # drain last FFN
         lb, ll = sched[-1]
@@ -171,7 +231,7 @@ class PipelinedRunner:
         y = self._ffn_read(kern[ll], N, h[lb].shape)
         if split:
             y = y + y_gpu.reshape(h[lb].shape)
-        h[lb] = h[lb] + y
+        h[lb] = self._ffn_combine(h[lb], y, self.layers[ll])
 
         return mx.concatenate([self._finalize(h[0]), self._finalize(h[1])], axis=0)
 

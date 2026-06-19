@@ -12,10 +12,10 @@ _lib = ctypes.CDLL(_DLL)
 
 _c = ctypes.c_void_p
 _lib.ane_init.restype = ctypes.c_int
-_lib.ane_ffn_compile.restype = _c
-_lib.ane_ffn_compile.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, _c, _c, _c]
-_lib.ane_ffn_compile_int8.restype = _c
-_lib.ane_ffn_compile_int8.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, _c, _c, _c]
+_ffn_argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, _c, _c, _c]
+for _fn in ("ane_ffn_compile", "ane_ffn_compile_gelu", "ane_ffn_compile_int8", "ane_ffn_compile_int8_gelu"):
+    getattr(_lib, _fn).restype = _c
+    getattr(_lib, _fn).argtypes = _ffn_argtypes
 _lib.ane_matmul_compile.restype = _c
 _lib.ane_matmul_compile.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, _c]
 _lib.ane_set_input.argtypes = [_c, _c, ctypes.c_size_t]
@@ -84,23 +84,27 @@ class ANEKernel:
             pass
 
 
-def compile_ffn(dim, hidden, seq, W1, W3, W2) -> ANEKernel:
-    """Fused SwiGLU FFN over `hidden` channels.
+def compile_ffn(dim, hidden, seq, W1, W3, W2, gelu=False) -> ANEKernel:
+    """Fused gated FFN over `hidden` channels. gelu=False -> SwiGLU/SiLU (Qwen/Llama),
+    gelu=True -> GeGLU/tanh-approx GELU (Gemma).
     W1 (gate) [hidden,dim], W3 (up) [hidden,dim], W2 (down) [dim,hidden], all fp16 contiguous."""
     W1 = np.ascontiguousarray(W1, dtype=np.float16)
     W3 = np.ascontiguousarray(W3, dtype=np.float16)
     W2 = np.ascontiguousarray(W2, dtype=np.float16)
-    h = _lib.ane_ffn_compile(dim, hidden, seq, _ptr(W1), _ptr(W3), _ptr(W2))
+    fn = _lib.ane_ffn_compile_gelu if gelu else _lib.ane_ffn_compile
+    h = fn(dim, hidden, seq, _ptr(W1), _ptr(W3), _ptr(W2))
     return ANEKernel(h, dim, dim, seq)
 
 
-def compile_ffn_int8(dim, hidden, seq, W1, W3, W2) -> ANEKernel:
-    """Fused SwiGLU FFN with INT8 weights (quantized internally, dequantized in-engine).
-    fp16 I/O; streams ~half the weight bytes per eval. ~1.5x faster than fp16, ~1% error."""
+def compile_ffn_int8(dim, hidden, seq, W1, W3, W2, gelu=False) -> ANEKernel:
+    """Fused gated FFN with INT8 weights (quantized internally, dequantized in-engine).
+    gelu selects SwiGLU (False) vs GeGLU (True). fp16 I/O; streams ~half the weight bytes
+    per eval. ~1.5x faster than fp16, ~1% error."""
     W1 = np.ascontiguousarray(W1, dtype=np.float16)
     W3 = np.ascontiguousarray(W3, dtype=np.float16)
     W2 = np.ascontiguousarray(W2, dtype=np.float16)
-    h = _lib.ane_ffn_compile_int8(dim, hidden, seq, _ptr(W1), _ptr(W3), _ptr(W2))
+    fn = _lib.ane_ffn_compile_int8_gelu if gelu else _lib.ane_ffn_compile_int8
+    h = fn(dim, hidden, seq, _ptr(W1), _ptr(W3), _ptr(W2))
     return ANEKernel(h, dim, dim, seq)
 
 

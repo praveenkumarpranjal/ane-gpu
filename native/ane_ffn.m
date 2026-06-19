@@ -77,8 +77,23 @@ static NSString *mil_matmul(int in_ch, int out_ch, int S) {
       in_ch,S, out_ch,in_ch,out_ch,in_ch, out_ch,S];
 }
 
-// fused SwiGLU FFN: y = (silu(x@W1) * (x@W3)) @ W2
-static NSString *mil_ffn(int dim, int h, int S) {
+// activation+combine block: hh = act(gate) * up.
+//   gelu=1 -> tanh-approx GELU (GeGLU, e.g. Gemma);  gelu=0 -> SiLU (SwiGLU, e.g. Qwen/Llama)
+static NSString *act_block(int h, int S, int gelu) {
+    if (gelu)
+        return [NSString stringWithFormat:
+          @"    tensor<fp16,[1,%d,1,%d]> gact = gelu(mode=string(\"TANH_APPROXIMATION\"), x=gate)[name=string(\"gact\")];\n"
+          "    tensor<fp16,[1,%d,1,%d]> hh = mul(x=gact, y=up)[name=string(\"hh\")];\n",
+          h,S, h,S];
+    return [NSString stringWithFormat:
+      @"    tensor<fp16,[1,%d,1,%d]> sg = sigmoid(x=gate)[name=string(\"sg\")];\n"
+      "    tensor<fp16,[1,%d,1,%d]> silu = mul(x=gate, y=sg)[name=string(\"silu\")];\n"
+      "    tensor<fp16,[1,%d,1,%d]> hh = mul(x=silu, y=up)[name=string(\"hh\")];\n",
+      h,S, h,S, h,S];
+}
+
+// fused gated FFN: y = (act(x@W1) * (x@W3)) @ W2 ; act = SiLU (gelu=0) or GELU (gelu=1)
+static NSString *mil_ffn(int dim, int h, int S, int gelu) {
     return [NSString stringWithFormat:
       @"program(1.3)\n[buildInfo = dict<string, string>({{\"coremlc-version\", \"3505.4.1\"}})]\n"
       "{\n  func main<ios18>(tensor<fp16, [1, %d, 1, %d]> x) {\n"
@@ -92,13 +107,11 @@ static NSString *mil_ffn(int dim, int h, int S) {
       "    tensor<fp16,[%d,%d,1,1]> W2 = const()[name=string(\"W2\"), val=tensor<fp16,[%d,%d,1,1]>(BLOBFILE(path=string(\"@model_path/weights/w2.bin\"), offset=uint64(64)))];\n"
       "    tensor<fp16,[1,%d,1,%d]> gate = conv(dilations=dl, groups=gr, pad=pd, pad_type=vpt, strides=st, weight=W1, x=x)[name=string(\"gate\")];\n"
       "    tensor<fp16,[1,%d,1,%d]> up = conv(dilations=dl, groups=gr, pad=pd, pad_type=vpt, strides=st, weight=W3, x=x)[name=string(\"up\")];\n"
-      "    tensor<fp16,[1,%d,1,%d]> sg = sigmoid(x=gate)[name=string(\"sg\")];\n"
-      "    tensor<fp16,[1,%d,1,%d]> silu = mul(x=gate, y=sg)[name=string(\"silu\")];\n"
-      "    tensor<fp16,[1,%d,1,%d]> hh = mul(x=silu, y=up)[name=string(\"hh\")];\n"
+      "%@"
       "    tensor<fp16,[1,%d,1,%d]> y = conv(dilations=dl, groups=gr, pad=pd, pad_type=vpt, strides=st, weight=W2, x=hh)[name=string(\"y\")];\n"
       "  } -> (y);\n}\n",
       dim,S, h,dim,h,dim, h,dim,h,dim, dim,h,dim,h,
-      h,S, h,S, h,S, h,S, h,S, dim,S];
+      h,S, h,S, act_block(h,S,gelu), dim,S];
 }
 
 // --- INT8 weight path: int8 weights dequantized in-engine (constexpr_affine_dequantize).
@@ -126,8 +139,8 @@ static uint8_t *blob_q8(const int8_t *q, int out_ch, int in_ch, size_t *len) {
     memcpy(b+128, q, ws); *len=total; return b;
 }
 
-// fused SwiGLU FFN with int8 weights (dequantized via constexpr_affine_dequantize)
-static NSString *mil_ffn_q8(int dim, int h, int S, double s1, double s3, double s2) {
+// fused gated FFN with int8 weights (dequantized via constexpr_affine_dequantize); act per gelu flag
+static NSString *mil_ffn_q8(int dim, int h, int S, double s1, double s3, double s2, int gelu) {
     return [NSString stringWithFormat:
       @"program(1.3)\n[buildInfo = dict<string, string>({{\"coremlc-version\", \"3505.4.1\"}})]\n"
       "{\n  func main<ios18>(tensor<fp16, [1, %d, 1, %d]> x) {\n"
@@ -141,13 +154,11 @@ static NSString *mil_ffn_q8(int dim, int h, int S, double s1, double s3, double 
       "    tensor<fp16,[%d,%d,1,1]> W2 = constexpr_affine_dequantize()[axis=int32(0), name=string(\"W2\"), quantized_data=tensor<int8,[%d,%d,1,1]>(BLOBFILE(path=string(\"@model_path/weights/w2.bin\"), offset=uint64(64))), scale=fp16(%.9g), zero_point=int8(0)];\n"
       "    tensor<fp16,[1,%d,1,%d]> gate = conv(dilations=dl, groups=gr, pad=pd, pad_type=vpt, strides=st, weight=W1, x=x)[name=string(\"gate\")];\n"
       "    tensor<fp16,[1,%d,1,%d]> up = conv(dilations=dl, groups=gr, pad=pd, pad_type=vpt, strides=st, weight=W3, x=x)[name=string(\"up\")];\n"
-      "    tensor<fp16,[1,%d,1,%d]> sg = sigmoid(x=gate)[name=string(\"sg\")];\n"
-      "    tensor<fp16,[1,%d,1,%d]> silu = mul(x=gate, y=sg)[name=string(\"silu\")];\n"
-      "    tensor<fp16,[1,%d,1,%d]> hh = mul(x=silu, y=up)[name=string(\"hh\")];\n"
+      "%@"
       "    tensor<fp16,[1,%d,1,%d]> y = conv(dilations=dl, groups=gr, pad=pd, pad_type=vpt, strides=st, weight=W2, x=hh)[name=string(\"y\")];\n"
       "  } -> (y);\n}\n",
       dim,S, h,dim,h,dim,s1, h,dim,h,dim,s3, dim,h,dim,h,s2,
-      h,S, h,S, h,S, h,S, h,S, dim,S];
+      h,S, h,S, act_block(h,S,gelu), dim,S];
 }
 
 // compile a MIL program with named weight blobs; alloc IOSurfaces sized in/out (fp16 channels x S)
@@ -194,8 +205,8 @@ static ANEHandle *compile_common(NSString *mil, NSDictionary *weightsDict, NSArr
     }
 }
 
-void *ane_ffn_compile(int dim, int hidden, int seq,
-                      const uint16_t *W1, const uint16_t *W3, const uint16_t *W2) {
+static void *ffn_compile_impl(int dim, int hidden, int seq,
+                      const uint16_t *W1, const uint16_t *W3, const uint16_t *W2, int gelu) {
     if (!g_ready && ane_init() != 0) return NULL;
     @autoreleasepool {
         size_t l1,l3,l2;
@@ -207,13 +218,22 @@ void *ane_ffn_compile(int dim, int hidden, int seq,
                              @"@model_path/weights/w3.bin":@{@"offset":@0,@"data":d3},
                              @"@model_path/weights/w2.bin":@{@"offset":@0,@"data":d2}};
         NSArray *files = @[@[@"weights/w1.bin",d1], @[@"weights/w3.bin",d3], @[@"weights/w2.bin",d2]];
-        return compile_common(mil_ffn(dim,hidden,seq), wd, files, dim, dim, seq);
+        return compile_common(mil_ffn(dim,hidden,seq,gelu), wd, files, dim, dim, seq);
     }
 }
 
+void *ane_ffn_compile(int dim, int hidden, int seq,
+                      const uint16_t *W1, const uint16_t *W3, const uint16_t *W2) {
+    return ffn_compile_impl(dim,hidden,seq,W1,W3,W2,0);   // SwiGLU (SiLU)
+}
+void *ane_ffn_compile_gelu(int dim, int hidden, int seq,
+                      const uint16_t *W1, const uint16_t *W3, const uint16_t *W2) {
+    return ffn_compile_impl(dim,hidden,seq,W1,W3,W2,1);   // GeGLU (tanh-approx GELU)
+}
+
 // fused FFN with INT8 weights. Takes fp16 weights, quantizes internally. fp16 I/O.
-void *ane_ffn_compile_int8(int dim, int hidden, int seq,
-                           const uint16_t *W1, const uint16_t *W3, const uint16_t *W2) {
+static void *ffn_compile_int8_impl(int dim, int hidden, int seq,
+                           const uint16_t *W1, const uint16_t *W3, const uint16_t *W2, int gelu) {
     if (!g_ready && ane_init() != 0) return NULL;
     @autoreleasepool {
         int n1 = hidden * dim, n2 = dim * hidden;
@@ -229,8 +249,17 @@ void *ane_ffn_compile_int8(int dim, int hidden, int seq,
                              @"@model_path/weights/w3.bin":@{@"offset":@0,@"data":d3},
                              @"@model_path/weights/w2.bin":@{@"offset":@0,@"data":d2}};
         NSArray *files = @[@[@"weights/w1.bin",d1], @[@"weights/w3.bin",d3], @[@"weights/w2.bin",d2]];
-        return compile_common(mil_ffn_q8(dim,hidden,seq,s1,s3,s2), wd, files, dim, dim, seq);
+        return compile_common(mil_ffn_q8(dim,hidden,seq,s1,s3,s2,gelu), wd, files, dim, dim, seq);
     }
+}
+
+void *ane_ffn_compile_int8(int dim, int hidden, int seq,
+                           const uint16_t *W1, const uint16_t *W3, const uint16_t *W2) {
+    return ffn_compile_int8_impl(dim,hidden,seq,W1,W3,W2,0);   // SwiGLU
+}
+void *ane_ffn_compile_int8_gelu(int dim, int hidden, int seq,
+                           const uint16_t *W1, const uint16_t *W3, const uint16_t *W2) {
+    return ffn_compile_int8_impl(dim,hidden,seq,W1,W3,W2,1);   // GeGLU
 }
 
 void *ane_matmul_compile(int in_ch, int out_ch, int seq, const uint16_t *W) {
