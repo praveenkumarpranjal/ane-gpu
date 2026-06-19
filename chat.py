@@ -20,9 +20,13 @@ import mlx.nn as nn
 from mlx_lm import load, stream_generate
 from mlx_lm.models.cache import make_prompt_cache
 
-_args = [a for a in sys.argv[1:] if not a.startswith("--")]
+argv = sys.argv[1:]
+MAX_TOKENS = 512
+if "--max-tokens" in argv:                       # e.g. --max-tokens 2048
+    i = argv.index("--max-tokens"); MAX_TOKENS = int(argv[i + 1]); del argv[i:i + 2]
+BITS = 4 if "--4bit" in argv else (8 if "--8bit" in argv else None)
+_args = [a for a in argv if not a.startswith("--")]
 MODEL = _args[0] if _args else "Qwen/Qwen2.5-1.5B-Instruct"
-BITS = 4 if "--4bit" in sys.argv else (8 if "--8bit" in sys.argv else None)
 
 
 def chat():
@@ -57,7 +61,7 @@ def chat():
         reply = ""
         last = None
         gen_ids = []
-        for r in stream_generate(model, tok, prompt=new, max_tokens=512, prompt_cache=cache):
+        for r in stream_generate(model, tok, prompt=new, max_tokens=MAX_TOKENS, prompt_cache=cache):
             print(r.text, end="", flush=True)
             reply += r.text
             gen_ids.append(r.token)
