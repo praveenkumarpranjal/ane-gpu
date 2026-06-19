@@ -56,6 +56,7 @@ class PipelinedRunner:
             else:
                 self._Wg.append(None)
         self._kernels = {}
+        self._compatible = None     # lazily verified on first call (SwiGLU-or-fallback)
 
     @staticmethod
     def _np(w):
@@ -93,12 +94,40 @@ class PipelinedRunner:
 
     def _finalize(self, h):
         h = self.mdl.norm(h)
-        return self.mdl.embed_tokens.as_linear(h) if self.tied else self.model.lm_head(h)
+        if self.tied or getattr(self.model, "lm_head", None) is None:
+            return self.mdl.embed_tokens.as_linear(h)
+        return self.model.lm_head(h)
+
+    def _check_compatible(self):
+        """Verify the fused-SwiGLU ANE kernel actually reproduces THIS model's FFN.
+        Returns False for non-SwiGLU archs (e.g. Gemma's GeGLU) or any structural
+        mismatch, so __call__ can transparently fall back to plain MLX — never wrong,
+        never crash."""
+        try:
+            l0 = self.layers[0]
+            probe = (mx.random.normal((32, self.dim)) * 0.5).astype(mx.float16)
+            ref = l0.mlp(probe)
+            k = self._kernel(0, 32)
+            if not k:
+                return False
+            k.inbuf[:, :32] = np.array(mx.transpose(probe.astype(mx.float16)))
+            if not k.run():
+                return False
+            got = mx.transpose(mx.array(k.outbuf[:, :32]))
+            mx.eval(ref, got)
+            rel = float(mx.mean(mx.abs(got - ref)) / (mx.mean(mx.abs(ref)) + 1e-6))
+            return rel < 0.05
+        except Exception:
+            return False
 
     def __call__(self, tokens):
         B, S = tokens.shape
         if not ENABLED or _make_mask is None or B < 2 or (B % 2) != 0:
             return self.model(tokens)
+        if self._compatible is None:
+            self._compatible = self._check_compatible()
+        if not self._compatible:
+            return self.model(tokens)        # non-SwiGLU arch -> plain MLX, transparently
 
         half = B // 2
         t = [tokens[:half], tokens[half:]]
