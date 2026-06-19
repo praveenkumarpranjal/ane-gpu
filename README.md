@@ -3,18 +3,30 @@
 Research + a working library for running LLM inference across the **Apple Neural Engine
 (ANE) and the GPU concurrently** on Apple Silicon, treating the two engines as one chip.
 
-The headline deliverable is [`anegpu`](anegpu/README.md): a drop-in MLX accelerator you can
-apply to any mlx-lm model with one call.
+Two ways to use it:
 
 ```python
 from mlx_lm import load
 import anegpu
-
 model, tok = load("Qwen/Qwen2.5-0.5B-Instruct")
-model = anegpu.accelerate(model)      # FFNs now run on ANE + GPU together
+
+# (a) drop-in: FFNs run split across ANE+GPU
+model = anegpu.accelerate(model)
+
+# (b) TRUE PARALLELISM for batched inference: a 2-stage pipeline runs the GPU and ANE
+#     at the SAME time (one micro-batch's attention on the GPU while another's FFN runs
+#     on the ANE). ~1.6-1.9x over GPU-only, numerically identical.
+runner = anegpu.PipelinedRunner(model)
+logits = runner(tokens)               # tokens [B, S], B even >= 2
 ```
 
 ## TL;DR — honest results (Qwen2.5-0.5B, M4)
+
+- **TRUE GPU+ANE parallelism via a 2-stage pipeline (`PipelinedRunner`): ~1.6–1.9× over
+  GPU-only** (5021 vs 2642 tok/s in the cool demo; 1.63× under heavy thermal load),
+  numerically exact (argmax matches on all rows). Both engines run at once — while the ANE
+  computes one micro-batch's FFN on a worker thread, the GPU computes another's attention.
+  Needs an even batch ≥ 2 (independent sequences to overlap).
 
 - The ANE computes a fused SwiGLU FFN **~3.5× faster than MLX-GPU in isolation** (1501 µs
   vs 5328 µs @ seq 512), and the split is **numerically correct** (logits match the
