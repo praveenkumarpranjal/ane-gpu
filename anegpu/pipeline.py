@@ -31,8 +31,9 @@ except Exception:
 
 
 class PipelinedRunner:
-    def __init__(self, model, ane_frac=1.0):
+    def __init__(self, model, ane_frac=1.0, int8=False):
         self.model = model
+        self.int8 = int8
         self.mdl = model.model
         self.layers = self.mdl.layers
         self.dim = model.args.hidden_size
@@ -64,7 +65,8 @@ class PipelinedRunner:
         k = self._kernels.get((li, Npad))
         if k is None:
             g, u, d = self._Wa[li]
-            k = ane.compile_ffn(self.dim, self.ane_h, Npad, g, u, d)
+            compile_fn = ane.compile_ffn_int8 if self.int8 else ane.compile_ffn
+            k = compile_fn(self.dim, self.ane_h, Npad, g, u, d)
             self._kernels[(li, Npad)] = k
         return k
 
