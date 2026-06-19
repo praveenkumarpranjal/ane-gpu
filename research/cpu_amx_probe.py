@@ -3,11 +3,14 @@
 While the ANE+GPU run, the P-cores are idle. Route a token slice of the FFN through
 Accelerate (numpy fp32 GEMM uses AMX and releases the GIL) on a worker thread.
 
-Finding: the threading overlaps the ANE fine, BUT numpy/Accelerate fp32 only reaches
-~1.1 TFLOPS -> ~11x slower than the int8 ANE (12.8 TFLOPS). So the CPU can only carry
-~8% of tokens before it becomes the bottleneck -> ~1.09x on the FFN stage, and the GPU
-attention floor (6.8 ms/layer) caps it anyway. A real fp16 BNNS path (~2 TFLOPS) would
-reach ~1.12x. Marginal and floor-limited; not worth the build on M4-base.
+Finding: the threading overlaps the ANE fine (numpy BLAS releases the GIL, 1.48x), BUT the
+CPU GEMM is far too slow. numpy fp32 ~1.1 TF; direct Accelerate/BNNS (see amx_fp16_probe.c)
+tops out at fp32 sgemm ~1.5-1.7 TF (gate/up) / ~1.2 TF (down). COUNTERINTUITIVE: fp16/bf16
+on M4 via Accelerate are NOT faster than fp32 -- they're slower (1.3-1.5 TF gate, and the
+down-proj collapses to ~0.46 TF). The expected "fp16 ~2x" does NOT hold on M4's AMX path.
+So best CPU ~1.5 TF = ~8-9x slower than the int8 ANE (12.8 TF) -> CPU carries only ~11% of
+tokens -> ~1.12x on the FFN stage, floor-limited by GPU attention (6.8 ms) and further
+eroded by weight-bandwidth contention (the CPU streams the same FFN weights). Not worth it.
 """
 import sys, os, time, threading
 import numpy as np
