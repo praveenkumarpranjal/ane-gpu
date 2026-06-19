@@ -37,10 +37,20 @@ def chat():
         prompt = tok.apply_chat_template(history, add_generation_prompt=True)
         print("bot> ", end="", flush=True)
         reply = ""
+        last = None
         for r in stream_generate(model, tok, prompt=prompt, max_tokens=512):
             print(r.text, end="", flush=True)
             reply += r.text
-        print("\n")
+            last = r
+        print()
+        if last is not None:
+            pt, ptps = last.prompt_tokens, last.prompt_tps
+            gt, gtps = last.generation_tokens, last.generation_tps
+            pre_ms = (pt / ptps * 1000) if ptps else 0.0
+            dec_s = (gt / gtps) if gtps else 0.0
+            print(f"  \033[90m[prefill {pt} tok @ {ptps:6.1f} tok/s ({pre_ms:5.0f} ms)"
+                  f"  |  decode {gt} tok @ {gtps:6.1f} tok/s ({dec_s:5.2f} s)"
+                  f"  |  total {pre_ms/1000 + dec_s:5.2f} s  |  peak {last.peak_memory:.2f} GB]\033[0m\n")
         history.append({"role": "assistant", "content": reply})
 
 
