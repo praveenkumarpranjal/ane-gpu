@@ -36,6 +36,7 @@ def chat():
     if BITS:
         nn.quantize(model, group_size=64, bits=BITS)
         mx.eval(model.parameters())
+    mx.eval(model(mx.array([[1, 2, 3, 4]])))     # warm kernels so turn 1 isn't compile-penalized
     print("ready. KV cache reused across turns -> only NEW tokens are prefilled each turn.")
     print("('exit' to quit, 'reset' to clear history)\n")
     history = []
