@@ -117,17 +117,25 @@ static NSString *mil_ffn(int dim, int h, int S, int gelu) {
 // --- INT8 weight path: int8 weights dequantized in-engine (constexpr_affine_dequantize).
 // Streams ~half the weight bytes per eval (the FFN bottleneck) at fp16 I/O. ---
 
-// quantize fp16 weights -> int8 (global symmetric), return scale = max|w|/127
-static double quantize_q8(const uint16_t *w_bits, int n, int8_t *out) {
+// quantize fp16 weights -> int8 PER OUTPUT CHANNEL (each row = one out_ch gets its own
+// symmetric scale = max|row|/127). Writes int8 to `out`, fp16 scales [out_ch] to `scales`.
+// Per-channel (vs per-tensor) cuts the error ~6x and prevents fp16 overflow->NaN on deep
+// models (e.g. Qwen-1.5B, 28 layers) where accumulated per-tensor error tips past 65504.
+static void quantize_q8(const uint16_t *w_bits, int out_ch, int in_ch, int8_t *out, uint16_t *scales) {
     const _Float16 *w = (const _Float16 *)w_bits;
-    float maxabs = 0.0f;
-    for (int i = 0; i < n; i++) { float a = fabsf((float)w[i]); if (a > maxabs) maxabs = a; }
-    double scale = maxabs / 127.0; if (scale == 0.0) scale = 1.0;
-    for (int i = 0; i < n; i++) {
-        int q = (int)lroundf((float)w[i] / scale);
-        out[i] = q < -128 ? -128 : (q > 127 ? 127 : q);
+    _Float16 *sc = (_Float16 *)scales;
+    for (int c = 0; c < out_ch; c++) {
+        const _Float16 *row = w + (size_t)c * in_ch;
+        int8_t *orow = out + (size_t)c * in_ch;
+        float maxabs = 0.0f;
+        for (int i = 0; i < in_ch; i++) { float a = fabsf((float)row[i]); if (a > maxabs) maxabs = a; }
+        float scale = maxabs / 127.0f; if (scale == 0.0f) scale = 1.0f;
+        for (int i = 0; i < in_ch; i++) {
+            int q = (int)lroundf((float)row[i] / scale);
+            orow[i] = q < -128 ? -128 : (q > 127 ? 127 : q);
+        }
+        sc[c] = (_Float16)scale;
     }
-    return scale;
 }
 
 // int8 weight blob: same proven header, 1 byte/elem
@@ -139,8 +147,8 @@ static uint8_t *blob_q8(const int8_t *q, int out_ch, int in_ch, size_t *len) {
     memcpy(b+128, q, ws); *len=total; return b;
 }
 
-// fused gated FFN with int8 weights (dequantized via constexpr_affine_dequantize); act per gelu flag
-static NSString *mil_ffn_q8(int dim, int h, int S, double s1, double s3, double s2, int gelu) {
+// fused gated FFN with int8 weights, PER-CHANNEL scale vectors (BLOBFILE s1/s3/s2.bin); act per gelu flag
+static NSString *mil_ffn_q8(int dim, int h, int S, int gelu) {
     return [NSString stringWithFormat:
       @"program(1.3)\n[buildInfo = dict<string, string>({{\"coremlc-version\", \"3505.4.1\"}})]\n"
       "{\n  func main<ios18>(tensor<fp16, [1, %d, 1, %d]> x) {\n"
@@ -149,15 +157,15 @@ static NSString *mil_ffn_q8(int dim, int h, int S, double s1, double s3, double 
       "    tensor<int32,[4]> pd = const()[name=string(\"pd\"), val=tensor<int32,[4]>([0,0,0,0])];\n"
       "    tensor<int32,[2]> dl = const()[name=string(\"dl\"), val=tensor<int32,[2]>([1,1])];\n"
       "    int32 gr = const()[name=string(\"gr\"), val=int32(1)];\n"
-      "    tensor<fp16,[%d,%d,1,1]> W1 = constexpr_affine_dequantize()[axis=int32(0), name=string(\"W1\"), quantized_data=tensor<int8,[%d,%d,1,1]>(BLOBFILE(path=string(\"@model_path/weights/w1.bin\"), offset=uint64(64))), scale=fp16(%.9g), zero_point=int8(0)];\n"
-      "    tensor<fp16,[%d,%d,1,1]> W3 = constexpr_affine_dequantize()[axis=int32(0), name=string(\"W3\"), quantized_data=tensor<int8,[%d,%d,1,1]>(BLOBFILE(path=string(\"@model_path/weights/w3.bin\"), offset=uint64(64))), scale=fp16(%.9g), zero_point=int8(0)];\n"
-      "    tensor<fp16,[%d,%d,1,1]> W2 = constexpr_affine_dequantize()[axis=int32(0), name=string(\"W2\"), quantized_data=tensor<int8,[%d,%d,1,1]>(BLOBFILE(path=string(\"@model_path/weights/w2.bin\"), offset=uint64(64))), scale=fp16(%.9g), zero_point=int8(0)];\n"
+      "    tensor<fp16,[%d,%d,1,1]> W1 = constexpr_affine_dequantize()[axis=int32(0), name=string(\"W1\"), quantized_data=tensor<int8,[%d,%d,1,1]>(BLOBFILE(path=string(\"@model_path/weights/w1.bin\"), offset=uint64(64))), scale=tensor<fp16,[%d]>(BLOBFILE(path=string(\"@model_path/weights/s1.bin\"), offset=uint64(64))), zero_point=int8(0)];\n"
+      "    tensor<fp16,[%d,%d,1,1]> W3 = constexpr_affine_dequantize()[axis=int32(0), name=string(\"W3\"), quantized_data=tensor<int8,[%d,%d,1,1]>(BLOBFILE(path=string(\"@model_path/weights/w3.bin\"), offset=uint64(64))), scale=tensor<fp16,[%d]>(BLOBFILE(path=string(\"@model_path/weights/s3.bin\"), offset=uint64(64))), zero_point=int8(0)];\n"
+      "    tensor<fp16,[%d,%d,1,1]> W2 = constexpr_affine_dequantize()[axis=int32(0), name=string(\"W2\"), quantized_data=tensor<int8,[%d,%d,1,1]>(BLOBFILE(path=string(\"@model_path/weights/w2.bin\"), offset=uint64(64))), scale=tensor<fp16,[%d]>(BLOBFILE(path=string(\"@model_path/weights/s2.bin\"), offset=uint64(64))), zero_point=int8(0)];\n"
       "    tensor<fp16,[1,%d,1,%d]> gate = conv(dilations=dl, groups=gr, pad=pd, pad_type=vpt, strides=st, weight=W1, x=x)[name=string(\"gate\")];\n"
       "    tensor<fp16,[1,%d,1,%d]> up = conv(dilations=dl, groups=gr, pad=pd, pad_type=vpt, strides=st, weight=W3, x=x)[name=string(\"up\")];\n"
       "%@"
       "    tensor<fp16,[1,%d,1,%d]> y = conv(dilations=dl, groups=gr, pad=pd, pad_type=vpt, strides=st, weight=W2, x=hh)[name=string(\"y\")];\n"
       "  } -> (y);\n}\n",
-      dim,S, h,dim,h,dim,s1, h,dim,h,dim,s3, dim,h,dim,h,s2,
+      dim,S, h,dim,h,dim,h, h,dim,h,dim,h, dim,h,dim,h,dim,
       h,S, h,S, act_block(h,S,gelu), dim,S];
 }
 
@@ -238,18 +246,29 @@ static void *ffn_compile_int8_impl(int dim, int hidden, int seq,
     @autoreleasepool {
         int n1 = hidden * dim, n2 = dim * hidden;
         int8_t *q1 = malloc(n1), *q3 = malloc(n1), *q2 = malloc(n2);
-        double s1 = quantize_q8(W1, n1, q1), s3 = quantize_q8(W3, n1, q3), s2 = quantize_q8(W2, n2, q2);
-        size_t l1, l3, l2;
+        uint16_t *sc1 = malloc(hidden * 2), *sc3 = malloc(hidden * 2), *sc2 = malloc(dim * 2);
+        quantize_q8(W1, hidden, dim, q1, sc1);    // per output channel
+        quantize_q8(W3, hidden, dim, q3, sc3);
+        quantize_q8(W2, dim, hidden, q2, sc2);
+        size_t l1, l3, l2, ls1, ls3, ls2;
         uint8_t *b1 = blob_q8(q1, hidden, dim, &l1), *b3 = blob_q8(q3, hidden, dim, &l3), *b2 = blob_q8(q2, dim, hidden, &l2);
-        free(q1); free(q3); free(q2);
+        uint8_t *bs1 = blob(sc1, hidden, 1, &ls1), *bs3 = blob(sc3, hidden, 1, &ls3), *bs2 = blob(sc2, dim, 1, &ls2);
+        free(q1); free(q3); free(q2); free(sc1); free(sc3); free(sc2);
         NSData *d1=[NSData dataWithBytesNoCopy:b1 length:l1 freeWhenDone:YES];
         NSData *d3=[NSData dataWithBytesNoCopy:b3 length:l3 freeWhenDone:YES];
         NSData *d2=[NSData dataWithBytesNoCopy:b2 length:l2 freeWhenDone:YES];
+        NSData *ds1=[NSData dataWithBytesNoCopy:bs1 length:ls1 freeWhenDone:YES];
+        NSData *ds3=[NSData dataWithBytesNoCopy:bs3 length:ls3 freeWhenDone:YES];
+        NSData *ds2=[NSData dataWithBytesNoCopy:bs2 length:ls2 freeWhenDone:YES];
         NSDictionary *wd = @{@"@model_path/weights/w1.bin":@{@"offset":@0,@"data":d1},
                              @"@model_path/weights/w3.bin":@{@"offset":@0,@"data":d3},
-                             @"@model_path/weights/w2.bin":@{@"offset":@0,@"data":d2}};
-        NSArray *files = @[@[@"weights/w1.bin",d1], @[@"weights/w3.bin",d3], @[@"weights/w2.bin",d2]];
-        return compile_common(mil_ffn_q8(dim,hidden,seq,s1,s3,s2,gelu), wd, files, dim, dim, seq);
+                             @"@model_path/weights/w2.bin":@{@"offset":@0,@"data":d2},
+                             @"@model_path/weights/s1.bin":@{@"offset":@0,@"data":ds1},
+                             @"@model_path/weights/s3.bin":@{@"offset":@0,@"data":ds3},
+                             @"@model_path/weights/s2.bin":@{@"offset":@0,@"data":ds2}};
+        NSArray *files = @[@[@"weights/w1.bin",d1], @[@"weights/w3.bin",d3], @[@"weights/w2.bin",d2],
+                           @[@"weights/s1.bin",ds1], @[@"weights/s3.bin",ds3], @[@"weights/s2.bin",ds2]];
+        return compile_common(mil_ffn_q8(dim,hidden,seq,gelu), wd, files, dim, dim, seq);
     }
 }
 

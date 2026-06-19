@@ -69,6 +69,7 @@ class PipelinedRunner:
                 self._Wg.append(None)
         self._kernels = {}
         self._compatible = None     # lazily verified on first call (SwiGLU-or-fallback)
+        self._int8_ok = None        # per-layer: int8 safe, or fp16 fallback (overflow layers)
 
     @staticmethod
     def _np(w):
@@ -78,7 +79,8 @@ class PipelinedRunner:
         k = self._kernels.get((li, Npad))
         if k is None:
             g, u, d = self._Wa[li]
-            compile_fn = ane.compile_ffn_int8 if self.int8 else ane.compile_ffn
+            use_int8 = self.int8 and (self._int8_ok is None or self._int8_ok[li])
+            compile_fn = ane.compile_ffn_int8 if use_int8 else ane.compile_ffn
             k = compile_fn(self.dim, self.ane_h, Npad, g, u, d, gelu=self._gelu)
             self._kernels[(li, Npad)] = k
         return k
@@ -180,6 +182,45 @@ class PipelinedRunner:
         except Exception:
             return False
 
+    def _calibrate_int8(self, tokens, N, Npad):
+        """The ANE int8 conv accumulates in fp16; on large-activation layers (e.g. Qwen-1.5B
+        layer 1) the down-proj partial sums overflow -> inf/NaN, while the const-fp16 path
+        (fp32 accum) stays finite. So run one fp16 reference forward, and for each layer keep
+        int8 only if its kernel output is finite + accurate on the REAL activations; otherwise
+        fall back to fp16 for that layer. Good int8 kernels are cached for reuse."""
+        self._int8_ok = [True] * len(self.layers)
+        try:
+            half = max(1, tokens.shape[0] // 2)
+            h = self._embed(tokens[:half])
+            gm, sw = self._masks(h)
+            for li, l in enumerate(self.layers):
+                h, fin = self._attn(h, l, self._mask_for(li, gm, sw))
+                g, u, d = self._Wa[li]
+                k = ane.compile_ffn_int8(self.dim, self.ane_h, Npad, g, u, d, gelu=self._gelu)
+                ok = False
+                if k:
+                    self._ffn_prep(fin, k, N, Npad)
+                    k.run()
+                    yt = self._ffn_read(k, N, fin.shape)
+                    ref = l.mlp(fin)
+                    mx.eval(yt, ref)
+                    finite = bool(mx.all(mx.isfinite(yt)))
+                    rel = float(mx.mean(mx.abs(yt - ref)) / (mx.mean(mx.abs(ref)) + 1e-6))
+                    ok = finite and rel < 0.1
+                if ok:
+                    self._kernels[(li, Npad)] = k       # reuse the verified int8 kernel
+                elif k:
+                    k.free()
+                self._int8_ok[li] = ok
+                h = self._ffn_combine(h, l.mlp(fin), l)  # advance with exact fp16 FFN
+            bad = self._int8_ok.count(False)
+            if bad:
+                import sys
+                print(f"anegpu: {bad}/{len(self.layers)} layers fell back to fp16 "
+                      f"(int8 overflow); rest run int8", file=sys.stderr)
+        except Exception:
+            self._int8_ok = [True] * len(self.layers)
+
     def __call__(self, tokens):
         B, S = tokens.shape
         if not ENABLED or _make_mask is None or B < 2 or (B % 2) != 0:
@@ -194,6 +235,8 @@ class PipelinedRunner:
         N = half * S
         Npad = _cpad(N)
         L = len(self.layers)
+        if self.int8 and self._int8_ok is None:
+            self._calibrate_int8(tokens, N, Npad)
         kern = [self._kernel(li, Npad) for li in range(L)]
         if not all(kern):
             return self.model(tokens)
