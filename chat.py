@@ -1,25 +1,35 @@
 #!/usr/bin/env python3
 """Interactive multi-turn chat with an mlx-lm model.
 
-    python chat.py                              # default Qwen2.5-1.5B-Instruct
-    python chat.py Qwen/Qwen2.5-0.5B-Instruct   # any mlx-lm chat model
+    python chat.py                              # default Qwen2.5-1.5B-Instruct (fp16)
+    python chat.py --4bit                       # 4-bit quantized: ~3x faster decode (~100 tok/s)
+    python chat.py --8bit Qwen/Qwen2.5-0.5B-Instruct
 
-NOTE on acceleration: this is single-stream autoregressive decode (batch=1, one token at a
-time), which CANNOT use the ANE+GPU pipeline (it needs batch>=2 to overlap micro-batches).
-So chat runs on plain MLX (GPU). The anegpu PipelinedRunner accelerates BATCHED PREFILL /
-throughput serving (many prompts at once) -- see batch_demo() below for where it helps.
+DECODE SPEED: chat is memory-bandwidth-bound -- every token streams all the weights -- so
+quantization is the lever. fp16 ~31 tok/s vs 4-bit ~101 tok/s on M4 (beats ollama's ~80).
+Use --4bit for interactive speed. (Quantizing in-process briefly doubles memory; for a low
+RAM footprint load a pre-quantized model, e.g. mlx-community/Qwen2.5-1.5B-Instruct-4bit.)
+
+NOTE on the ANE+GPU pipeline: it accelerates BATCHED PREFILL (batch>=2), NOT single-stream
+decode -- so it doesn't apply to chat. See batch_demo() for where it helps.
 """
 import os, sys
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 import mlx.core as mx
+import mlx.nn as nn
 from mlx_lm import load, stream_generate
 
-MODEL = sys.argv[1] if len(sys.argv) > 1 else "Qwen/Qwen2.5-1.5B-Instruct"
+_args = [a for a in sys.argv[1:] if not a.startswith("--")]
+MODEL = _args[0] if _args else "Qwen/Qwen2.5-1.5B-Instruct"
+BITS = 4 if "--4bit" in sys.argv else (8 if "--8bit" in sys.argv else None)
 
 
 def chat():
-    print(f"loading {MODEL} ...")
+    print(f"loading {MODEL}{f' ({BITS}-bit)' if BITS else ' (fp16)'} ...")
     model, tok = load(MODEL)
+    if BITS:
+        nn.quantize(model, group_size=64, bits=BITS)
+        mx.eval(model.parameters())
     print("ready. type your message ('exit' to quit, 'reset' to clear history).\n")
     history = []
     while True:
