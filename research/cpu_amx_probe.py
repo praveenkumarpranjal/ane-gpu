@@ -8,9 +8,14 @@ CPU GEMM is far too slow. numpy fp32 ~1.1 TF; direct Accelerate/BNNS (see amx_fp
 tops out at fp32 sgemm ~1.5-1.7 TF (gate/up) / ~1.2 TF (down). COUNTERINTUITIVE: fp16/bf16
 on M4 via Accelerate are NOT faster than fp32 -- they're slower (1.3-1.5 TF gate, and the
 down-proj collapses to ~0.46 TF). The expected "fp16 ~2x" does NOT hold on M4's AMX path.
-So best CPU ~1.5 TF = ~8-9x slower than the int8 ANE (12.8 TF) -> CPU carries only ~11% of
-tokens -> ~1.12x on the FFN stage, floor-limited by GPU attention (6.8 ms) and further
-eroded by weight-bandwidth contention (the CPU streams the same FFN weights). Not worth it.
+int8 too (amx_fp16_probe.c): weight-only int8 (fp act x int8 w, = ANE's scheme) is SLOWER
+on the CPU (0.42-0.57 TF -- BNNS dequants to fp then fp-GEMMs); full int8xint8 hits the AMX
+int8 gear at ~1.8 TF but needs lossy dynamic activation quant whose overhead eats the ~1.2x
+over fp32. So best honest CPU GEMM ~1.5-1.8 TF regardless of dtype = ~7-8x slower than the
+int8 ANE (12.8 TF) -> CPU carries only ~11-12% of tokens -> ~1.12-1.14x on the FFN stage,
+floor-limited by GPU attention (6.8 ms) and further eroded by weight-bandwidth contention
+(the CPU streams the same FFN weights). The M4 CPU's AMX (~1.5-1.8 TF) is just too small a
+matrix unit next to the dedicated ANE; no dtype changes that. Not worth the build.
 """
 import sys, os, time, threading
 import numpy as np

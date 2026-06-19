@@ -47,6 +47,34 @@ static double bench(int K, int M, int N, int iters, BNNSDataType dt) {
   return gflop/dt_s/1e3;
 }
 
+// int8 GEMM: in_dt/w_dt int8 (with scales) -> fp32 out. weight-only = in_dt fp32, w_dt int8.
+static double bench_q(int K, int M, int N, int iters, BNNSDataType in_dt, BNNSDataType w_dt) {
+  size_t ies=(in_dt==BNNSDataTypeInt8)?1:4;
+  void *in=malloc(ies*(size_t)N*K); void *W=malloc((w_dt==BNNSDataTypeInt8?1:4)*(size_t)M*K);
+  float *out=malloc(sizeof(float)*(size_t)N*M);
+  if(in_dt==BNNSDataTypeInt8){int8_t*p=in;for(size_t x=0;x<(size_t)N*K;x++)p[x]=(int8_t)(rand()%255-127);}
+  else{float*p=in;for(size_t x=0;x<(size_t)N*K;x++)p[x]=(float)((rand()/(double)RAND_MAX-0.5));}
+  if(w_dt==BNNSDataTypeInt8){int8_t*p=W;for(size_t x=0;x<(size_t)M*K;x++)p[x]=(int8_t)(rand()%255-127);}
+  else{float*p=W;for(size_t x=0;x<(size_t)M*K;x++)p[x]=(float)((rand()/(double)RAND_MAX-0.5)*0.1);}
+  BNNSNDArrayDescriptor id; memset(&id,0,sizeof(id));
+  id.layout=BNNSDataLayoutVector; id.size[0]=(size_t)K; id.data_type=in_dt; id.data_scale=(in_dt==BNNSDataTypeInt8)?0.01f:1.0f;
+  BNNSNDArrayDescriptor od; memset(&od,0,sizeof(od));
+  od.layout=BNNSDataLayoutVector; od.size[0]=(size_t)M; od.data_type=BNNSDataTypeFloat32;
+  BNNSNDArrayDescriptor wd; memset(&wd,0,sizeof(wd));
+  wd.layout=BNNSDataLayoutRowMajorMatrix; wd.size[0]=(size_t)K; wd.size[1]=(size_t)M; wd.data=W; wd.data_type=w_dt; wd.data_scale=(w_dt==BNNSDataTypeInt8)?0.01f:1.0f;
+  BNNSLayerParametersFullyConnected p; memset(&p,0,sizeof(p));
+  p.i_desc=id; p.o_desc=od; p.w_desc=wd; p.activation=(BNNSActivation){.function=BNNSActivationFunctionIdentity};
+  BNNSFilter f=BNNSFilterCreateLayerFullyConnected(&p,NULL);
+  const char*tag = (in_dt==BNNSDataTypeInt8)?"int8xint8":"fp32xint8(w-only)";
+  if(!f){printf("  %-18s K=%4d M=%4d: create FAILED\n",tag,K,M); free(in);free(W);free(out); return -1;}
+  for(int w=0;w<5;w++) BNNSFilterApplyBatch(f,(size_t)N,in,(size_t)K,out,(size_t)M);
+  double t0=now_s(); for(int it=0;it<iters;it++) BNNSFilterApplyBatch(f,(size_t)N,in,(size_t)K,out,(size_t)M);
+  double dt_s=(now_s()-t0)/iters; BNNSFilterDestroy(f); free(in);free(W);free(out);
+  double gflop=2.0*M*K*N/1e9;
+  printf("  %-18s K=%4d M=%4d N=%5d: %8.0f us  %5.2f TFLOPS\n",tag,K,M,N,dt_s*1e6,gflop/dt_s/1e3);
+  return gflop/dt_s/1e3;
+}
+
 int main(void) {
   int D=896,H=4864;
   printf("Accelerate/BNNS fp16 GEMM (AMX fp16 path):\n");
@@ -56,6 +84,10 @@ int main(void) {
   bench(D,H,552,30,BNNSDataTypeBFloat16); bench(D,H,2208,30,BNNSDataTypeBFloat16); bench(H,D,4096,30,BNNSDataTypeBFloat16);
   printf("fp32 (cross-check vs numpy 1.1 TF):\n");
   bench(D,H,552,30,BNNSDataTypeFloat32); bench(D,H,4096,30,BNNSDataTypeFloat32); bench(H,D,4096,30,BNNSDataTypeFloat32);
+  printf("int8 weights only (fp32 act x int8 w -- matches ANE):\n");
+  bench_q(D,H,4096,30,BNNSDataTypeFloat32,BNNSDataTypeInt8); bench_q(H,D,4096,30,BNNSDataTypeFloat32,BNNSDataTypeInt8);
+  printf("full int8 (int8 act x int8 w -- AMX int8 datapath):\n");
+  bench_q(D,H,552,30,BNNSDataTypeInt8,BNNSDataTypeInt8); bench_q(D,H,4096,30,BNNSDataTypeInt8,BNNSDataTypeInt8); bench_q(H,D,4096,30,BNNSDataTypeInt8,BNNSDataTypeInt8);
   // full fp16 FFN cost for a 13.5%% token slice (gate+up+down)
   int Nc=552; double t0=now_s();
   // approximate via 3 GEMM benches summed is misleading; instead time the dominant two
