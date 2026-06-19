@@ -18,6 +18,7 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 import mlx.core as mx
 import mlx.nn as nn
 from mlx_lm import load, stream_generate
+from mlx_lm.models.cache import make_prompt_cache
 
 _args = [a for a in sys.argv[1:] if not a.startswith("--")]
 MODEL = _args[0] if _args else "Qwen/Qwen2.5-1.5B-Instruct"
@@ -30,8 +31,11 @@ def chat():
     if BITS:
         nn.quantize(model, group_size=64, bits=BITS)
         mx.eval(model.parameters())
-    print("ready. type your message ('exit' to quit, 'reset' to clear history).\n")
+    print("ready. KV cache reused across turns -> only NEW tokens are prefilled each turn.")
+    print("('exit' to quit, 'reset' to clear history)\n")
     history = []
+    cache = make_prompt_cache(model)
+    cached_ids = []        # the token ids currently held in the KV cache
     while True:
         try:
             user = input("you> ").strip()
@@ -42,17 +46,24 @@ def chat():
         if user.lower() in ("exit", "quit"):
             break
         if user.lower() == "reset":
-            history = []; print("(history cleared)\n"); continue
+            history = []; cache = make_prompt_cache(model); cached_ids = []
+            print("(history cleared)\n"); continue
         history.append({"role": "user", "content": user})
-        prompt = tok.apply_chat_template(history, add_generation_prompt=True)
+        full = list(tok.apply_chat_template(history, add_generation_prompt=True))
+        if full[:len(cached_ids)] != cached_ids:        # tokenization diverged -> rebuild cache
+            cache = make_prompt_cache(model); cached_ids = []
+        new = full[len(cached_ids):]                     # feed ONLY the uncached suffix
         print("bot> ", end="", flush=True)
         reply = ""
         last = None
-        for r in stream_generate(model, tok, prompt=prompt, max_tokens=512):
+        gen_ids = []
+        for r in stream_generate(model, tok, prompt=new, max_tokens=512, prompt_cache=cache):
             print(r.text, end="", flush=True)
             reply += r.text
+            gen_ids.append(r.token)
             last = r
         print()
+        cached_ids = full + gen_ids                      # cache now holds prompt + response
         if last is not None:
             pt, ptps = last.prompt_tokens, last.prompt_tps
             gt, gtps = last.generation_tokens, last.generation_tps
