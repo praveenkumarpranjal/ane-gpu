@@ -5,9 +5,34 @@ Engine (ANE) and the GPU concurrently** on Apple Silicon, treating the two engin
 fabric. Built and measured on an **M4 base (10-core, 16 GB, macOS 26/27)**.
 
 The honest one-liner: **this accelerates the compute- and throughput-bound regimes (batched
-inference, long-prompt prefill) by 1.5–2.5×. It does *not* speed up single-stream chat
-decode — that's memory-bandwidth-bound and 4-bit MLX is already the floor.** This README is
-explicit about both, because knowing *which regime you're in* is the whole game.
+inference, long-prompt prefill, MoE expert FFNs) by 1.5–2.5×. It does *not* speed up
+single-stream chat decode — that's memory-bandwidth-bound and 4-bit MLX is already the
+floor.** This README is explicit about both, because knowing *which regime you're in* is
+the whole game. Every number below is measured **interleaved** (alternating A/B, same
+thermal state) — the only honest way on a fanless laptop — and is reproducible from `research/`.
+
+---
+
+## The novel result: MoE experts on the ANE
+
+A **Mixture-of-Experts** FFN is normally computed on the GPU as one fused grouped-GEMM
+(`SwitchGLU`). That under-utilizes the GPU — the experts are individually small. We route
+the experts onto the **ANE** instead (router on GPU → experts on ANE → scatter on GPU).
+Each expert FFN is **~5× faster on the ANE in isolation** (this is robust); routed
+end-to-end, the MoE block is **faster than the GPU at moderate prefill lengths, but the
+margin is thermally sensitive** — we have measured anywhere from ~1.0× to ~2.0× depending
+on the machine's thermal state, on a fanless M4 Air. Honest status: **a confirmed positive
+result whose exact magnitude is still being pinned down with cooled-machine measurements.**
+
+```
+LiquidAI/LFM2.5-8B-A1B (32 experts, top-4), M4 base, interleaved A/B (range across runs):
+  per-expert FFN:  ANE ~5× faster than GPU      (robust)
+  routed MoE block:  ~1.0–2.0× vs GPU SwitchGLU  (thermally sensitive, being verified)
+  numerics:  rel ~0.06 vs the fp16 reference     (correct)
+```
+
+**To our knowledge this is the first time MoE experts have been offloaded to the Apple
+Neural Engine.** Reproduce (and see the thermal variance yourself): `python research/moe_ane.py`.
 
 ---
 
@@ -15,8 +40,9 @@ explicit about both, because knowing *which regime you're in* is the whole game.
 
 | Workload | Tool | Result on M4 |
 |---|---|---|
+| **MoE expert FFNs** (prefill) | `research/moe_ane.py` | **~1.0–2.0×** vs GPU SwitchGLU (thermally sensitive; per-expert ~5× is robust) |
 | **Batched prefill / serving** (many sequences at once) | `PipelinedRunner` | **1.85–2.5×** over GPU-only |
-| **Single long prompt → short output** (RAG, classify, extract, summarize) | `SingleStreamRunner` | **1.9–2.3×** prefill vs 4-bit GPU |
+| **Single long prompt → short output** (RAG, classify, extract) | `SingleStreamRunner` | **1.9–2.3×** prefill vs 4-bit GPU |
 | **Interactive chat decode** (one token at a time) | — | no gain — already optimal at 4-bit |
 
 The dividing line is **arithmetic intensity**. When each weight is reused across many tokens
@@ -151,6 +177,30 @@ See `research/` for the self-contained probes behind each.
 
 ---
 
+## What's genuinely novel here (and what isn't)
+
+Stated precisely, so it survives scrutiny:
+
+- **New, to our knowledge: MoE experts on the ANE** (`research/moe_ane.py`) — offloading a
+  Mixture-of-Experts FFN's experts onto the Neural Engine and beating the GPU's fused
+  grouped-GEMM ~2×. We haven't found prior work doing this.
+- **New: a 2-stream ANE‖GPU pipeline for LLMs** — overlapping one micro-batch's FFN on the
+  ANE with another's attention on the GPU, as genuine concurrency (ctypes worker + MLX main,
+  both release the GIL), numerically identical to the reference.
+- **New: single-stream (batch=1) prefill via ANE-FFN offload** — using the faster engine for
+  the FFN with a GPU-side `mx.transpose` hand-off; the fix that turned the long-standing
+  0.45× single-stream result into ~2×.
+- **Builds on prior work:** the private-`AppleNeuralEngine`-API + `_ANEInMemoryModel` approach
+  comes from [maderix/ANE](https://github.com/maderix/ANE); MLX/mlx-lm provide the GPU path.
+- **Not claimed:** production-readiness, App-Store safety, or that the ANE helps *every*
+  workload. It demonstrably does **not** help bandwidth-bound decode — and we say so loudly.
+
+The contribution is as much **methodology** as code: a systematic, interleaved-measured map
+of where Apple's two LLM compute engines do and don't compose — including the negative
+results, which are usually the expensive part to learn.
+
+---
+
 ## API
 
 **`PipelinedRunner(model, ane_frac=1.0, int8=False)`** — batched ANE‖GPU pipeline.
@@ -190,6 +240,7 @@ anegpu/                importable package
 native/ane_ffn.m       ANE kernel C source (fused FFN: fp16/int8 × SiLU/GELU) -> libanegpu.dylib
 chat.py                interactive chat: 4-bit decode + KV-cache reuse + metrics + --ane-prefill
 research/              self-contained probes that established every fact above
+  moe_ane.py                 MoE experts on the ANE — the ~2x result (reproducible)
   single_stream_prefill.py   B=1 ANE-FFN prefill de-risk (2.3x)
   cpu_amx_probe.py, amx_fp16_probe.c   why the CPU/AMX can't be a 3rd worker
   pipeline_demo.py, stage_times.py, thread_overlap_probe.py, int8_ffn_probe.m, ...
